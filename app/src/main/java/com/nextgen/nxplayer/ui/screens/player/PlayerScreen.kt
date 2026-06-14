@@ -1,26 +1,64 @@
 package com.nextgen.nxplayer.ui.screens.player
 
+import android.app.Activity
+import android.content.Intent
 import android.media.AudioManager
-import android.view.SurfaceView
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.BookmarkAdd
+import androidx.compose.material.icons.rounded.ClosedCaption
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nextgen.nxplayer.ui.screens.player.controls.KidsLockOverlay
+import androidx.media3.ui.PlayerView
+import com.nextgen.nxplayer.data.model.Bookmark
 import com.nextgen.nxplayer.ui.screens.player.controls.PlaybackControls
 import kotlinx.coroutines.delay
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun PlayerScreen(
@@ -28,6 +66,7 @@ fun PlayerScreen(
     viewModel: PlayerViewModel = viewModel()
 ) {
     val uri = remember(videoUri) { videoUri.toUri() }
+
     val isPlaying by viewModel.isPlaying.collectAsState()
     val currentPosition by viewModel.currentPosition.collectAsState()
     val duration by viewModel.duration.collectAsState()
@@ -35,155 +74,198 @@ fun PlayerScreen(
     val currentSpeed by viewModel.speed.collectAsState()
     val subtitleTracks by viewModel.subtitleTracks.collectAsState()
     val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsState()
+    val abRepeatActive by viewModel.abRepeatActive.collectAsState()
+    val playerMessage by viewModel.playerMessage.collectAsState()
+    val bookmarks by viewModel.bookmarks.collectAsState()
 
     val context = LocalContext.current
-    val audioManager = remember { context.getSystemService(AudioManager::class.java) }
-
-    // Remember the SurfaceView so we can attach VLC to it
-    var surfaceView by remember { mutableStateOf<SurfaceView?>(null) }
-
-    // Initialize player and attach surface when ready
-    LaunchedEffect(uri) {
-        viewModel.initializePlayer(uri)
-    }
-    LaunchedEffect(surfaceView) {
-        surfaceView?.let { viewModel.attachSurface(it) }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { viewModel.releasePlayer() }
+    val activity = context as? Activity
+    val audioManager = remember {
+        context.getSystemService(AudioManager::class.java)
     }
 
     var controlsVisible by remember { mutableStateOf(true) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
+    var showBookmarkDialog by remember { mutableStateOf(false) }
 
-    // Auto‑hide controls when playing
-    LaunchedEffect(isPlaying, controlsVisible) {
-        if (isPlaying && controlsVisible) {
+    val subtitlePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { subtitleUri: Uri? ->
+        subtitleUri?.let {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+
+            viewModel.loadExternalSubtitle(it)
+        }
+    }
+
+    LaunchedEffect(uri) {
+        viewModel.initializePlayer(uri)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.releasePlayer()
+        }
+    }
+
+    LaunchedEffect(isPlaying, controlsVisible, kidsLocked) {
+        if (isPlaying && controlsVisible && !kidsLocked) {
             delay(3000)
             controlsVisible = false
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // VLC video surface
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
         AndroidView(
             factory = { ctx ->
-                SurfaceView(ctx).also { surfaceView = it }
+                PlayerView(ctx).apply {
+                    player = viewModel.getPlayer()
+                    useController = false
+                    keepScreenOn = true
+                }
+            },
+            update = { playerView ->
+                playerView.player = viewModel.getPlayer()
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Gesture overlay (brightness, volume, seek)
         if (!kidsLocked) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        var startX = 0f
-                        var startY = 0f
-                        var startBrightness = 0f
-                        var startVolume = 0
-
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val pointer = event.changes.firstOrNull() ?: continue
-                                when {
-                                    pointer.pressed && pointer.previousPressed.not() -> {
-                                        startX = pointer.position.x
-                                        startY = pointer.position.y
-                                        startBrightness = (context as? android.app.Activity)
-                                            ?.window?.attributes?.screenBrightness ?: 0.5f
-                                        startVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
-                                    }
-                                    pointer.pressed -> {
-                                        val dx = pointer.position.x - startX
-                                        val dy = pointer.position.y - startY
-                                        val width = size.width.toFloat()
-                                        val height = size.height.toFloat()
-
-                                        if (kotlin.math.abs(dx) > kotlin.math.abs(dy) && kotlin.math.abs(dx) > 20) {
-                                            val seekDelta = (dx / width * 30000).toLong()
-                                            viewModel.seekRelative(seekDelta)
-                                            startX = pointer.position.x
-                                        } else if (kotlin.math.abs(dy) > kotlin.math.abs(dx) && kotlin.math.abs(dy) > 20) {
-                                            if (startX < width / 2) {
-                                                val brightnessDelta = -dy / height
-                                                val newBrightness = (startBrightness + brightnessDelta).coerceIn(0.01f, 1.0f)
-                                                (context as? android.app.Activity)?.window?.attributes?.let { attrs ->
-                                                    attrs.screenBrightness = newBrightness
-                                                    context.window?.attributes = attrs
-                                                }
-                                            } else {
-                                                val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
-                                                val volumeDelta = (-dy / height * maxVolume).toInt()
-                                                val newVolume = (startVolume + volumeDelta).coerceIn(0, maxVolume)
-                                                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-                                            }
-                                        }
-                                    }
-                                    else -> {}
-                                }
-                            }
-                        }
-                    }
-            )
-
-            // Tap gestures (separate)
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onTap = { controlsVisible = !controlsVisible },
-                            onDoubleTap = { offset ->
-                                val width = size.width.toFloat()
-                                if (offset.x < width / 3) viewModel.seekRelative(-10000)
-                                else if (offset.x > 2 * width / 3) viewModel.seekRelative(10000)
-                            },
-                            onLongPress = { viewModel.toggleKidsLock() }
-                        )
-                    }
+            MxGestureLayer(
+                activity = activity,
+                audioManager = audioManager,
+                onSingleTap = {
+                    controlsVisible = !controlsVisible
+                },
+                onDoubleTapLeft = {
+                    viewModel.seekRelative(-10_000L)
+                },
+                onDoubleTapRight = {
+                    viewModel.seekRelative(10_000L)
+                },
+                onLongPress = {
+                    viewModel.toggleKidsLock()
+                    controlsVisible = false
+                },
+                onSeek = { delta ->
+                    viewModel.seekRelative(delta)
+                },
+                onBrightnessChanged = { percent ->
+                    viewModel.showMessage("Brightness $percent%")
+                },
+                onVolumeChanged = { percent ->
+                    viewModel.showMessage("Volume $percent%")
+                }
             )
         }
 
-        // Controls overlay
         if (controlsVisible && !kidsLocked) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    if (subtitleTracks.isNotEmpty()) {
-                        IconButton(onClick = { showSubtitleDialog = true }) {
-                            Icon(Icons.Rounded.ClosedCaption, "Subtitles", tint = Color.White)
+                    IconButton(
+                        onClick = {
+                            showSubtitleDialog = true
                         }
-                    }
-                    IconButton(onClick = {
-                        if (viewModel.abRepeatActive.value) viewModel.clearRepeat()
-                        else viewModel.setRepeatA()
-                    }) {
+                    ) {
                         Icon(
-                            if (viewModel.abRepeatActive.value) Icons.Rounded.RepeatOne
-                            else Icons.Rounded.Repeat,
-                            "A-B Repeat",
+                            Icons.Rounded.ClosedCaption,
+                            contentDescription = "Subtitles",
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = { viewModel.addBookmark() }) {
-                        Icon(Icons.Rounded.BookmarkAdd, "Bookmark", tint = Color.White)
+
+                    IconButton(
+                        onClick = {
+                            viewModel.toggleAbRepeat()
+                        }
+                    ) {
+                        Icon(
+                            imageVector =
+                                if (abRepeatActive) Icons.Rounded.RepeatOne
+                                else Icons.Rounded.Repeat,
+                            contentDescription = "A-B Repeat",
+                            tint = Color.White
+                        )
                     }
-                    IconButton(onClick = { showSleepTimerDialog = true }) {
-                        Icon(Icons.Rounded.Bedtime, "Sleep timer", tint = Color.White)
+
+                    IconButton(
+                        onClick = {
+                            viewModel.addBookmark()
+                        }
+                    ) {
+                        Icon(
+                            Icons.Rounded.BookmarkAdd,
+                            contentDescription = "Add bookmark",
+                            tint = Color.White
+                        )
                     }
-                    IconButton(onClick = { showSpeedDialog = true }) {
-                        Text("${currentSpeed}x", color = Color.White, style = MaterialTheme.typography.labelMedium)
+
+                    IconButton(
+                        onClick = {
+                            showBookmarkDialog = true
+                        }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Bookmark,
+                            contentDescription = "Bookmarks",
+                            tint = Color.White
+                        )
                     }
-                    IconButton(onClick = { viewModel.toggleKidsLock() }) {
-                        Icon(Icons.Rounded.Lock, "Lock", tint = Color.White)
+
+                    IconButton(
+                        onClick = {
+                            showSleepTimerDialog = true
+                        }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Bedtime,
+                            contentDescription = "Sleep timer",
+                            tint = Color.White
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            showSpeedDialog = true
+                        }
+                    ) {
+                        Text(
+                            text = "${currentSpeed}x",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            viewModel.toggleKidsLock()
+                            controlsVisible = false
+                        }
+                    ) {
+                        Icon(
+                            Icons.Rounded.Lock,
+                            contentDescription = "Lock",
+                            tint = Color.White
+                        )
                     }
                 }
 
@@ -191,52 +273,417 @@ fun PlayerScreen(
 
                 PlaybackControls(
                     isPlaying = isPlaying,
-                    onPlayPause = { viewModel.playPause() },
-                    onSkipNext = {},
-                    onSkipPrevious = {}
+                    onPlayPause = {
+                        viewModel.playPause()
+                    },
+                    onSkipNext = {
+                        viewModel.showMessage("Next video not added yet")
+                    },
+                    onSkipPrevious = {
+                        viewModel.showMessage("Previous video not added yet")
+                    }
                 )
+
                 Slider(
-                    value = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f,
-                    onValueChange = { viewModel.seekTo((it * duration).toLong()) },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    value =
+                        if (duration > 0L) {
+                            (currentPosition.toFloat() / duration.toFloat())
+                                .coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        },
+                    onValueChange = { progress ->
+                        if (duration > 0L) {
+                            viewModel.seekTo((progress * duration).toLong())
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
                 )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = formatPlayerTime(currentPosition),
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+
+                    Text(
+                        text = formatPlayerTime(duration),
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             }
         }
 
-        // Kids lock overlay
-        KidsLockOverlay(locked = kidsLocked, onUnlockRequest = { viewModel.toggleKidsLock() })
-
-        // Dialogs
-        if (showSpeedDialog) {
-            SpeedDialog(currentSpeed, { viewModel.setSpeed(it); showSpeedDialog = false }) { showSpeedDialog = false }
+        playerMessage?.let {
+            PlayerFeedbackOverlay(message = it)
         }
-        if (showSubtitleDialog && subtitleTracks.isNotEmpty()) {
-            SubtitleDialog(
-                tracks = subtitleTracks.map { it.name },   // show names
-                selectedIndex = selectedSubIndex,
-                onTrackSelected = { viewModel.selectSubtitleTrack(it); showSubtitleDialog = false },
-                onDisable = { viewModel.selectSubtitleTrack(-1); showSubtitleDialog = false },
-                onDismiss = { showSubtitleDialog = false }
+
+        if (kidsLocked) {
+            LockedPlayerOverlay(
+                onUnlock = {
+                    viewModel.toggleKidsLock()
+                    controlsVisible = true
+                }
             )
         }
+
+        if (showSpeedDialog) {
+            SpeedDialog(
+                currentSpeed = currentSpeed,
+                onSpeedSelected = { selectedSpeed ->
+                    viewModel.setSpeed(selectedSpeed)
+                    showSpeedDialog = false
+                },
+                onDismiss = {
+                    showSpeedDialog = false
+                }
+            )
+        }
+
+        if (showSubtitleDialog) {
+            SubtitleDialog(
+                tracks = subtitleTracks.map { it.name },
+                selectedIndex = selectedSubIndex,
+                onLoadExternalSubtitle = {
+                    showSubtitleDialog = false
+                    subtitlePicker.launch(
+                        arrayOf(
+                            "application/x-subrip",
+                            "text/plain",
+                            "text/vtt",
+                            "*/*"
+                        )
+                    )
+                },
+                onTrackSelected = { index ->
+                    viewModel.selectSubtitleTrack(index)
+                    showSubtitleDialog = false
+                },
+                onDisable = {
+                    viewModel.selectSubtitleTrack(-1)
+                    showSubtitleDialog = false
+                },
+                onDismiss = {
+                    showSubtitleDialog = false
+                }
+            )
+        }
+
+        if (showBookmarkDialog) {
+            BookmarkDialog(
+                bookmarks = bookmarks,
+                onBookmarkClick = { bookmark ->
+                    viewModel.seekToBookmark(bookmark)
+                    showBookmarkDialog = false
+                },
+                onDeleteBookmark = { bookmark ->
+                    viewModel.deleteBookmark(bookmark)
+                },
+                onDismiss = {
+                    showBookmarkDialog = false
+                }
+            )
+        }
+
         if (showSleepTimerDialog) {
-            SleepTimerDialog({ viewModel.setSleepTimer(it); showSleepTimerDialog = false }) { showSleepTimerDialog = false }
+            SleepTimerDialog(
+                onTimerSelected = { minutes ->
+                    viewModel.setSleepTimer(minutes)
+                    showSleepTimerDialog = false
+                },
+                onDismiss = {
+                    showSleepTimerDialog = false
+                }
+            )
         }
     }
 }
 
-// ------ Dialog composables ------
 @Composable
-fun SpeedDialog(currentSpeed: Float, onSpeedSelected: (Float) -> Unit, onDismiss: () -> Unit) {
-    val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+private fun MxGestureLayer(
+    activity: Activity?,
+    audioManager: AudioManager?,
+    onSingleTap: () -> Unit,
+    onDoubleTapLeft: () -> Unit,
+    onDoubleTapRight: () -> Unit,
+    onLongPress: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onBrightnessChanged: (Int) -> Unit,
+    onVolumeChanged: (Int) -> Unit
+) {
+    var lastTapTime by remember { mutableLongStateOf(0L) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+
+                    val startX = down.position.x
+                    val startY = down.position.y
+                    var lastPosition = down.position
+
+                    var dragged = false
+                    var dragMode = DragMode.NONE
+
+                    val startTime = down.uptimeMillis
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: event.changes.firstOrNull()
+                            ?: break
+
+                        if (!change.pressed) {
+                            val releaseTime = change.uptimeMillis
+                            val totalTime = releaseTime - startTime
+                            val totalDx = change.position.x - startX
+                            val totalDy = change.position.y - startY
+
+                            if (!dragged && totalTime > 450L) {
+                                onLongPress()
+                            } else if (!dragged && abs(totalDx) < 25f && abs(totalDy) < 25f) {
+                                if (releaseTime - lastTapTime < 300L) {
+                                    if (startX < size.width / 2f) {
+                                        onDoubleTapLeft()
+                                    } else {
+                                        onDoubleTapRight()
+                                    }
+                                    lastTapTime = 0L
+                                } else {
+                                    lastTapTime = releaseTime
+                                    onSingleTap()
+                                }
+                            }
+
+                            break
+                        }
+
+                        val dx = change.position.x - startX
+                        val dy = change.position.y - startY
+
+                        if (!dragged && (abs(dx) > 35f || abs(dy) > 35f)) {
+                            dragged = true
+
+                            dragMode =
+                                if (abs(dx) > abs(dy)) {
+                                    DragMode.SEEK
+                                } else if (startX < size.width / 2f) {
+                                    DragMode.BRIGHTNESS
+                                } else {
+                                    DragMode.VOLUME
+                                }
+                        }
+
+                        if (dragged) {
+                            when (dragMode) {
+                                DragMode.SEEK -> {
+                                    val deltaX = change.position.x - lastPosition.x
+                                    val seekDelta =
+                                        (deltaX / size.width.toFloat() * 60_000L).toLong()
+
+                                    if (abs(seekDelta) >= 300L) {
+                                        onSeek(seekDelta)
+                                    }
+                                }
+
+                                DragMode.BRIGHTNESS -> {
+                                    val deltaY = change.position.y - lastPosition.y
+                                    val percentDelta = -deltaY / size.height.toFloat()
+
+                                    val window = activity?.window
+                                    val attrs = window?.attributes
+
+                                    if (attrs != null && window != null) {
+                                        val currentBrightness =
+                                            if (attrs.screenBrightness >= 0f) {
+                                                attrs.screenBrightness
+                                            } else {
+                                                0.5f
+                                            }
+
+                                        val newBrightness =
+                                            (currentBrightness + percentDelta)
+                                                .coerceIn(0.01f, 1.0f)
+
+                                        attrs.screenBrightness = newBrightness
+                                        window.attributes = attrs
+
+                                        onBrightnessChanged(
+                                            (newBrightness * 100f).roundToInt()
+                                        )
+                                    }
+                                }
+
+                                DragMode.VOLUME -> {
+                                    val maxVolume =
+                                        audioManager?.getStreamMaxVolume(
+                                            AudioManager.STREAM_MUSIC
+                                        ) ?: 15
+
+                                    val currentVolume =
+                                        audioManager?.getStreamVolume(
+                                            AudioManager.STREAM_MUSIC
+                                        ) ?: 0
+
+                                    val deltaY = change.position.y - lastPosition.y
+                                    val volumeDelta =
+                                        (-deltaY / size.height.toFloat() * maxVolume)
+                                            .roundToInt()
+
+                                    if (volumeDelta != 0) {
+                                        val newVolume =
+                                            (currentVolume + volumeDelta)
+                                                .coerceIn(0, maxVolume)
+
+                                        audioManager?.setStreamVolume(
+                                            AudioManager.STREAM_MUSIC,
+                                            newVolume,
+                                            0
+                                        )
+
+                                        val percent =
+                                            ((newVolume.toFloat() / maxVolume.toFloat()) * 100f)
+                                                .roundToInt()
+
+                                        onVolumeChanged(percent)
+                                    }
+                                }
+
+                                DragMode.NONE -> Unit
+                            }
+
+                            lastPosition = change.position
+                            change.consumePositionChange()
+                        }
+                    }
+                }
+            }
+    )
+}
+
+private enum class DragMode {
+    NONE,
+    SEEK,
+    BRIGHTNESS,
+    VOLUME
+}
+
+@Composable
+private fun PlayerFeedbackOverlay(
+    message: String
+) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = message,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                style = MaterialTheme.typography.titleMedium
+            )
+        }
+    }
+}
+
+@Composable
+private fun LockedPlayerOverlay(
+    onUnlock: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.45f))
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onLongPress = {
+                        onUnlock()
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Card {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Lock,
+                    contentDescription = null,
+                    modifier = Modifier.size(42.dp)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Controls locked",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Long press to unlock",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun SpeedDialog(
+    currentSpeed: Float,
+    onSpeedSelected: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val speeds = listOf(
+        0.25f,
+        0.5f,
+        0.75f,
+        1.0f,
+        1.25f,
+        1.5f,
+        2.0f
+    )
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Playback Speed") },
+        title = {
+            Text("Playback Speed")
+        },
         text = {
             Column {
                 speeds.forEach { speed ->
-                    TextButton(onClick = { onSpeedSelected(speed) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("${speed}x", color = if (speed == currentSpeed) MaterialTheme.colorScheme.primary else Color.Unspecified)
+                    TextButton(
+                        onClick = {
+                            onSpeedSelected(speed)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "${speed}x",
+                            color =
+                                if (speed == currentSpeed) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Unspecified
+                                }
+                        )
                     }
                 }
             }
@@ -249,21 +696,74 @@ fun SpeedDialog(currentSpeed: Float, onSpeedSelected: (Float) -> Unit, onDismiss
 fun SubtitleDialog(
     tracks: List<String>,
     selectedIndex: Int,
+    onLoadExternalSubtitle: () -> Unit,
     onTrackSelected: (Int) -> Unit,
     onDisable: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Subtitles") },
+        title = {
+            Text("Subtitles")
+        },
         text = {
             Column {
-                TextButton(onClick = onDisable, modifier = Modifier.fillMaxWidth()) {
-                    Text("Off", color = if (selectedIndex == -1) MaterialTheme.colorScheme.primary else Color.Unspecified)
+                Button(
+                    onClick = onLoadExternalSubtitle,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Subtitles,
+                        contentDescription = null
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Text("Load subtitle file")
                 }
-                tracks.forEachIndexed { index, track ->
-                    TextButton(onClick = { onTrackSelected(index) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(track, color = if (index == selectedIndex) MaterialTheme.colorScheme.primary else Color.Unspecified)
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                TextButton(
+                    onClick = onDisable,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Off",
+                        color =
+                            if (selectedIndex == -1) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Unspecified
+                            }
+                    )
+                }
+
+                if (tracks.isEmpty()) {
+                    Text(
+                        text = "No embedded subtitle tracks found.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                } else {
+                    tracks.forEachIndexed { index, track ->
+                        TextButton(
+                            onClick = {
+                                onTrackSelected(index)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = track,
+                                color =
+                                    if (index == selectedIndex) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        Color.Unspecified
+                                    }
+                            )
+                        }
                     }
                 }
             }
@@ -273,20 +773,117 @@ fun SubtitleDialog(
 }
 
 @Composable
-fun SleepTimerDialog(onTimerSelected: (Int) -> Unit, onDismiss: () -> Unit) {
-    val options = listOf(15, 30, 60, -1)
+fun BookmarkDialog(
+    bookmarks: List<Bookmark>,
+    onBookmarkClick: (Bookmark) -> Unit,
+    onDeleteBookmark: (Bookmark) -> Unit,
+    onDismiss: () -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Sleep Timer") },
+        title = {
+            Text("Bookmarks")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (bookmarks.isEmpty()) {
+                    Text(
+                        text = "No bookmarks yet.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    bookmarks.forEach { bookmark ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    onBookmarkClick(bookmark)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(bookmark.title)
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    onDeleteBookmark(bookmark)
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Delete,
+                                    contentDescription = "Delete bookmark"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss
+            ) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
+fun SleepTimerDialog(
+    onTimerSelected: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val options = listOf(15, 30, 60, -1)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("Sleep Timer")
+        },
         text = {
             Column {
                 options.forEach { minutes ->
-                    TextButton(onClick = { onTimerSelected(minutes) }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (minutes == -1) "Off" else "$minutes min")
+                    TextButton(
+                        onClick = {
+                            onTimerSelected(minutes)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text =
+                                if (minutes == -1) {
+                                    "Off"
+                                } else {
+                                    "$minutes min"
+                                }
+                        )
                     }
                 }
             }
         },
         confirmButton = {}
     )
+}
+
+fun formatPlayerTime(milliseconds: Long): String {
+    val totalSeconds = milliseconds / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
 }

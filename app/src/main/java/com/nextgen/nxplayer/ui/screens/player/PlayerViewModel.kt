@@ -2,29 +2,33 @@ package com.nextgen.nxplayer.ui.screens.player
 
 import android.app.Application
 import android.net.Uri
-import android.view.SurfaceView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.exoplayer.ExoPlayer
 import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.data.model.Bookmark
 import com.nextgen.nxplayer.data.model.ResumeState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.MediaPlayer
-import java.io.File
-import java.io.FileOutputStream
+import kotlinx.coroutines.withContext
 
 @Suppress("unused")
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
-    private var libVlc: LibVLC? = null
-    private var mediaPlayer: MediaPlayer? = null
-    private var surfaceAttached = false   // track attachment
+    private var exoPlayer: ExoPlayer? = null
+    private var playerListenerAdded = false
 
     val videoTitle = MutableStateFlow("")
     val isPlaying = MutableStateFlow(false)
@@ -33,215 +37,503 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val speed = MutableStateFlow(1.0f)
     val kidsLocked = MutableStateFlow(false)
     val abRepeatActive = MutableStateFlow(false)
+    val errorMessage = MutableStateFlow<String?>(null)
+    val playerMessage = MutableStateFlow<String?>(null)
 
-    data class SubtitleTrack(val id: Int, val name: String)
+    data class SubtitleTrack(
+        val id: Int,
+        val name: String,
+        val groupIndex: Int,
+        val trackIndex: Int
+    )
+
     private val _subtitleTracks = MutableStateFlow<List<SubtitleTrack>>(emptyList())
     val subtitleTracks: StateFlow<List<SubtitleTrack>> = _subtitleTracks
+
     private val _selectedSubtitleIndex = MutableStateFlow(-1)
     val selectedSubtitleIndex: StateFlow<Int> = _selectedSubtitleIndex
 
+    private val _bookmarks = MutableStateFlow<List<Bookmark>>(emptyList())
+    val bookmarks: StateFlow<List<Bookmark>> = _bookmarks
+
     private var repeatA: Long? = null
     private var repeatB: Long? = null
-    private var sleepTimerJob: kotlinx.coroutines.Job? = null
+
+    private var positionJob: Job? = null
+    private var sleepTimerJob: Job? = null
+    private var messageJob: Job? = null
+    private var bookmarkJob: Job? = null
 
     private val db = AppDatabase.getInstance(application)
     private val prefs = PreferencesManager(application)
+
     private var currentVideoUri: Uri? = null
+    private var initializedUri: String? = null
+    private var externalSubtitleUri: Uri? = null
+
+    fun getPlayer(): ExoPlayer {
+        return getOrCreatePlayer()
+    }
+
+    private fun getOrCreatePlayer(): ExoPlayer {
+        val existing = exoPlayer
+        if (existing != null) return existing
+
+        val newPlayer = ExoPlayer.Builder(getApplication<Application>()).build()
+        exoPlayer = newPlayer
+        attachPlayerListener(newPlayer)
+        return newPlayer
+    }
+
+    private fun attachPlayerListener(player: ExoPlayer) {
+        if (playerListenerAdded) return
+        playerListenerAdded = true
+
+        player.addListener(object : Player.Listener {
+
+            override fun onIsPlayingChanged(isPlayingNow: Boolean) {
+                isPlaying.value = isPlayingNow
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_READY -> {
+                        val playerDuration = player.duration
+                        duration.value =
+                            if (playerDuration != C.TIME_UNSET) playerDuration else 0L
+
+                        updateSubtitleTracks()
+                    }
+
+                    Player.STATE_ENDED -> {
+                        isPlaying.value = false
+                        saveResumeState()
+                    }
+                }
+            }
+
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                updateSubtitleTracks()
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                errorMessage.value = error.localizedMessage ?: "Playback error"
+                showMessage("Playback error")
+                isPlaying.value = false
+            }
+        })
+    }
 
     fun initializePlayer(videoUri: Uri) {
         currentVideoUri = videoUri
-        val context = getApplication<Application>()
+        videoTitle.value = videoUri.lastPathSegment ?: "Video"
 
-        libVlc = LibVLC(context)
-        mediaPlayer = MediaPlayer(libVlc!!)
+        val player = getOrCreatePlayer()
+        val uriString = videoUri.toString()
 
-        mediaPlayer?.setEventListener { event ->
-            when (event.type) {
-                MediaPlayer.Event.Playing -> {
-                    isPlaying.value = true
-                    duration.value = mediaPlayer?.length ?: 0L
-                    videoTitle.value = videoUri.lastPathSegment ?: "Video"
-                    updateSubtitleTracks()
+        if (initializedUri == uriString) {
+            startPositionTracking()
+            loadBookmarks(uriString)
+            return
+        }
+
+        initializedUri = uriString
+        errorMessage.value = null
+        speed.value = prefs.defaultSpeed
+
+        val mediaItem = buildMediaItem(videoUri)
+
+        player.apply {
+            setMediaItem(mediaItem)
+            setPlaybackSpeed(prefs.defaultSpeed)
+            prepare()
+            playWhenReady = true
+        }
+
+        startPositionTracking()
+        loadResumeState(uriString)
+        loadBookmarks(uriString)
+    }
+
+    private fun buildMediaItem(videoUri: Uri): MediaItem {
+        val subtitleUri = externalSubtitleUri
+
+        return if (subtitleUri == null) {
+            MediaItem.fromUri(videoUri)
+        } else {
+            val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(subtitleUri)
+                .setMimeType(detectSubtitleMimeType(subtitleUri))
+                .setLanguage("en")
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .build()
+
+            MediaItem.Builder()
+                .setUri(videoUri)
+                .setSubtitleConfigurations(listOf(subtitleConfig))
+                .build()
+        }
+    }
+
+    private fun detectSubtitleMimeType(uri: Uri): String {
+        val text = uri.toString().lowercase()
+
+        return when {
+            text.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
+            text.endsWith(".vtt") -> MimeTypes.TEXT_VTT
+            text.endsWith(".ass") || text.endsWith(".ssa") -> MimeTypes.TEXT_SSA
+            else -> MimeTypes.APPLICATION_SUBRIP
+        }
+    }
+
+    fun loadExternalSubtitle(subtitleUri: Uri) {
+        val videoUri = currentVideoUri ?: return
+        val player = exoPlayer ?: return
+
+        val wasPlaying = player.isPlaying
+        val current = player.currentPosition
+
+        externalSubtitleUri = subtitleUri
+
+        player.setMediaItem(buildMediaItem(videoUri), current)
+        player.prepare()
+        player.playWhenReady = wasPlaying
+
+        showMessage("Subtitle loaded")
+    }
+
+    private fun startPositionTracking() {
+        positionJob?.cancel()
+
+        positionJob = viewModelScope.launch {
+            while (exoPlayer != null) {
+                val player = exoPlayer
+
+                if (player != null) {
+                    currentPosition.value = player.currentPosition
+
+                    val current = player.currentPosition
+                    val end = repeatB
+
+                    if (abRepeatActive.value && end != null && current >= end) {
+                        repeatA?.let { player.seekTo(it) }
+                    }
                 }
-                MediaPlayer.Event.Paused -> isPlaying.value = false
-                MediaPlayer.Event.Stopped -> isPlaying.value = false
-                MediaPlayer.Event.EndReached -> {
-                    isPlaying.value = false
-                    saveResumeState()
-                }
-                MediaPlayer.Event.TimeChanged -> {
-                    currentPosition.value = mediaPlayer?.time ?: 0L
-                    val pos = currentPosition.value
-                    if (abRepeatActive.value && repeatB != null && pos >= repeatB!!) {
-                        repeatA?.let { seekTo(it) }
+
+                delay(300)
+            }
+        }
+    }
+
+    fun playPause() {
+        val player = exoPlayer ?: return
+
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            player.play()
+        }
+    }
+
+    fun seekTo(positionMs: Long) {
+        val player = exoPlayer ?: return
+        val safePosition = positionMs.coerceAtLeast(0L)
+        player.seekTo(safePosition)
+        currentPosition.value = safePosition
+    }
+
+    fun seekRelative(deltaMs: Long) {
+        val player = exoPlayer ?: return
+        val newPosition = (player.currentPosition + deltaMs).coerceAtLeast(0L)
+        seekTo(newPosition)
+
+        if (deltaMs > 0) {
+            showMessage("+${deltaMs / 1000}s")
+        } else {
+            showMessage("${deltaMs / 1000}s")
+        }
+    }
+
+    fun setSpeed(newSpeed: Float) {
+        val safeSpeed = newSpeed.coerceIn(0.25f, 4.0f)
+        exoPlayer?.setPlaybackSpeed(safeSpeed)
+        speed.value = safeSpeed
+        prefs.defaultSpeed = safeSpeed
+        showMessage("${safeSpeed}x")
+    }
+
+    fun toggleKidsLock() {
+        kidsLocked.value = !kidsLocked.value
+
+        if (kidsLocked.value) {
+            showMessage("Controls locked")
+        } else {
+            showMessage("Controls unlocked")
+        }
+    }
+
+    fun toggleAbRepeat() {
+        if (abRepeatActive.value) {
+            clearRepeat()
+            return
+        }
+
+        if (repeatA == null) {
+            setRepeatA()
+        } else {
+            setRepeatB()
+        }
+    }
+
+    fun setRepeatA() {
+        repeatA = exoPlayer?.currentPosition
+        repeatB = null
+        abRepeatActive.value = false
+        showMessage("A point set")
+    }
+
+    fun setRepeatB() {
+        repeatB = exoPlayer?.currentPosition
+
+        val a = repeatA
+        val b = repeatB
+
+        if (a == null || b == null) {
+            showMessage("Set A first")
+            return
+        }
+
+        if (b <= a + 1000L) {
+            showMessage("B must be after A")
+            repeatB = null
+            return
+        }
+
+        abRepeatActive.value = true
+        showMessage("A-B repeat active")
+    }
+
+    fun clearRepeat() {
+        repeatA = null
+        repeatB = null
+        abRepeatActive.value = false
+        showMessage("A-B repeat off")
+    }
+
+    private fun updateSubtitleTracks() {
+        val player = exoPlayer ?: return
+        val currentTracks = player.currentTracks
+
+        val tracks = mutableListOf<SubtitleTrack>()
+        var selectedIndex = -1
+
+        currentTracks.groups.forEachIndexed { groupIndex, group ->
+            if (group.type == C.TRACK_TYPE_TEXT) {
+                for (trackIndex in 0 until group.length) {
+                    if (group.isTrackSupported(trackIndex)) {
+                        val format = group.getTrackFormat(trackIndex)
+
+                        val language = format.language
+                            ?.uppercase()
+                            ?.takeIf { it.isNotBlank() }
+
+                        val label = format.label
+                            ?.takeIf { it.isNotBlank() }
+
+                        val name = label ?: language ?: "Subtitle ${tracks.size + 1}"
+
+                        val subtitleTrack = SubtitleTrack(
+                            id = tracks.size,
+                            name = name,
+                            groupIndex = groupIndex,
+                            trackIndex = trackIndex
+                        )
+
+                        if (group.isTrackSelected(trackIndex)) {
+                            selectedIndex = subtitleTrack.id
+                        }
+
+                        tracks.add(subtitleTrack)
                     }
                 }
             }
         }
 
-        mediaPlayer?.rate = prefs.defaultSpeed
-        speed.value = prefs.defaultSpeed
-
-        loadResumeState(videoUri.toString())
-
-        viewModelScope.launch {
-            while (true) {
-                if (isPlaying.value) {
-                    currentPosition.value = mediaPlayer?.time ?: 0L
-                }
-                delay(250)
-            }
-        }
-    }
-
-    fun attachSurface(surfaceView: SurfaceView) {
-        val mp = mediaPlayer ?: return
-        // Detach if already attached (prevents crash on re-attach)
-        if (surfaceAttached) {
-            mp.vlcVout.detachViews()
-            surfaceAttached = false
-        }
-        mp.vlcVout.setVideoView(surfaceView)
-        mp.vlcVout.attachViews()
-        surfaceAttached = true
-
-        // Resolve content URI if necessary
-        val uri = currentVideoUri ?: return
-        val path = resolveUri(uri) ?: return
-        val media = Media(libVlc!!, path)
-        mp.media = media
-        media.release()
-        mp.play()
-    }
-
-    /** Convert content:// URI to file path (VLC prefers file paths on some devices) */
-    private fun resolveUri(uri: Uri): String? {
-        if (uri.scheme == "file") {
-            return uri.path
-        }
-        // For content URIs, copy to a temp file
-        try {
-            val context = getApplication<Application>()
-            val input = context.contentResolver.openInputStream(uri) ?: return null
-            val tempFile = File(context.cacheDir, "vlc_temp_video.mp4")
-            FileOutputStream(tempFile).use { output ->
-                input.copyTo(output)
-            }
-            input.close()
-            return tempFile.absolutePath
-        } catch (e: Exception) {
-            android.util.Log.e("NXPlayer", "Failed to resolve URI: ${e.message}")
-            // Fallback: try the original URI as string
-            return uri.toString()
-        }
-    }
-
-    private fun updateSubtitleTracks() {
-        val mp = mediaPlayer ?: return
-        val descriptions = mp.spuTracks
-        if (descriptions != null && descriptions.isNotEmpty()) {
-            val tracks = descriptions.mapIndexed { index, desc ->
-                SubtitleTrack(id = desc.id, name = desc.name ?: "Track ${index + 1}")
-            }
-            _subtitleTracks.value = tracks
-        } else {
-            _subtitleTracks.value = emptyList()
-        }
+        _subtitleTracks.value = tracks
+        _selectedSubtitleIndex.value = selectedIndex
     }
 
     fun selectSubtitleTrack(index: Int) {
-        val mp = mediaPlayer ?: return
-        val tracks = _subtitleTracks.value
-        if (index < 0 || index >= tracks.size) {
-            mp.spuTrack = -1
+        val player = exoPlayer ?: return
+
+        if (index < 0) {
+            player.trackSelectionParameters =
+                player.trackSelectionParameters
+                    .buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    .build()
+
             _selectedSubtitleIndex.value = -1
-        } else {
-            mp.spuTrack = tracks[index].id
-            _selectedSubtitleIndex.value = index
+            showMessage("Subtitles off")
+            return
         }
+
+        val selectedTrack = _subtitleTracks.value.getOrNull(index) ?: return
+        val trackGroup = player.currentTracks.groups.getOrNull(selectedTrack.groupIndex) ?: return
+
+        val override = TrackSelectionOverride(
+            trackGroup.mediaTrackGroup,
+            listOf(selectedTrack.trackIndex)
+        )
+
+        player.trackSelectionParameters =
+            player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .addOverride(override)
+                .build()
+
+        _selectedSubtitleIndex.value = index
+        showMessage("Subtitle: ${selectedTrack.name}")
     }
 
     private fun loadResumeState(videoUri: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val state = db.resumeDao().getResumeState(videoUri).firstOrNull()
-            state?.let { seekTo(it.positionMs) }
+        viewModelScope.launch {
+            val state = withContext(Dispatchers.IO) {
+                db.resumeDao().getResumeState(videoUri).firstOrNull()
+            }
+
+            state?.let {
+                if (it.positionMs > 3000L) {
+                    seekTo(it.positionMs)
+                    showMessage("Resumed")
+                }
+            }
         }
     }
 
     fun saveResumeState() {
         val uri = currentVideoUri?.toString() ?: return
-        val pos = mediaPlayer?.time ?: 0
+        val pos = exoPlayer?.currentPosition ?: 0L
+
         viewModelScope.launch(Dispatchers.IO) {
-            db.resumeDao().saveResumeState(ResumeState(uri, pos))
+            db.resumeDao().saveResumeState(
+                ResumeState(
+                    videoUri = uri,
+                    positionMs = pos
+                )
+            )
         }
     }
 
-    fun playPause() {
-        val mp = mediaPlayer ?: return
-        if (mp.isPlaying) mp.pause() else mp.play()
-    }
+    private fun loadBookmarks(videoUri: String) {
+        bookmarkJob?.cancel()
 
-    fun seekTo(positionMs: Long) {
-        mediaPlayer?.time = positionMs
-    }
-
-    fun seekRelative(deltaMs: Long) {
-        val current = mediaPlayer?.time ?: 0
-        seekTo(current + deltaMs)
-    }
-
-    fun setSpeed(newSpeed: Float) {
-        mediaPlayer?.rate = newSpeed
-        speed.value = newSpeed
-        prefs.defaultSpeed = newSpeed
-    }
-
-    fun toggleKidsLock() {
-        kidsLocked.value = !kidsLocked.value
-    }
-
-    fun setRepeatA() {
-        repeatA = mediaPlayer?.time
-        if (repeatA != null && repeatB != null) abRepeatActive.value = true
-    }
-    fun setRepeatB() {
-        repeatB = mediaPlayer?.time
-        if (repeatA != null && repeatB != null) abRepeatActive.value = true
-    }
-    fun clearRepeat() {
-        repeatA = null; repeatB = null; abRepeatActive.value = false
-    }
-
-    fun setSleepTimer(minutes: Int) {
-        sleepTimerJob?.cancel()
-        if (minutes <= 0) return
-        sleepTimerJob = viewModelScope.launch {
-            delay(minutes * 60_000L)
-            mediaPlayer?.pause()
+        bookmarkJob = viewModelScope.launch {
+            db.bookmarkDao()
+                .getBookmarksForVideo(videoUri)
+                .collect { savedBookmarks ->
+                    _bookmarks.value = savedBookmarks
+                }
         }
     }
 
     fun addBookmark(note: String = "") {
         val uri = currentVideoUri?.toString() ?: return
-        val pos = mediaPlayer?.time ?: return
+        val pos = exoPlayer?.currentPosition ?: return
+
         viewModelScope.launch(Dispatchers.IO) {
             db.bookmarkDao().insert(
-                Bookmark(videoUri = uri, title = "Bookmark", positionMs = pos, note = note)
+                Bookmark(
+                    videoUri = uri,
+                    title = formatBookmarkTitle(pos),
+                    positionMs = pos,
+                    note = note
+                )
             )
+        }
+
+        showMessage("Bookmark added")
+    }
+
+    fun deleteBookmark(bookmark: Bookmark) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.bookmarkDao().delete(bookmark)
+        }
+
+        showMessage("Bookmark deleted")
+    }
+
+    fun seekToBookmark(bookmark: Bookmark) {
+        seekTo(bookmark.positionMs)
+        showMessage(bookmark.title)
+    }
+
+    private fun formatBookmarkTitle(positionMs: Long): String {
+        val totalSeconds = positionMs / 1000
+        val hours = totalSeconds / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        val seconds = totalSeconds % 60
+
+        val time = if (hours > 0) {
+            "%d:%02d:%02d".format(hours, minutes, seconds)
+        } else {
+            "%d:%02d".format(minutes, seconds)
+        }
+
+        return "Bookmark $time"
+    }
+
+    fun setSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+
+        if (minutes <= 0) {
+            showMessage("Sleep timer off")
+            return
+        }
+
+        showMessage("Sleep timer: $minutes min")
+
+        sleepTimerJob = viewModelScope.launch {
+            delay(minutes * 60_000L)
+            exoPlayer?.pause()
+            showMessage("Sleep timer finished")
+        }
+    }
+
+    fun showMessage(message: String) {
+        messageJob?.cancel()
+
+        playerMessage.value = message
+
+        messageJob = viewModelScope.launch {
+            delay(900)
+            playerMessage.value = null
         }
     }
 
     fun releasePlayer() {
         saveResumeState()
-        if (surfaceAttached) {
-            mediaPlayer?.vlcVout?.detachViews()
-            surfaceAttached = false
-        }
-        mediaPlayer?.stop()
-        mediaPlayer?.release()
-        libVlc?.release()
-        mediaPlayer = null
-        libVlc = null
+
+        positionJob?.cancel()
+        positionJob = null
+
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+
+        messageJob?.cancel()
+        messageJob = null
+
+        bookmarkJob?.cancel()
+        bookmarkJob = null
+
+        exoPlayer?.release()
+        exoPlayer = null
+
+        playerListenerAdded = false
+        initializedUri = null
+        isPlaying.value = false
     }
 
     override fun onCleared() {

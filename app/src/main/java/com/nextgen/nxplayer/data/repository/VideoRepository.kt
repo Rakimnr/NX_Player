@@ -2,22 +2,39 @@ package com.nextgen.nxplayer.data.repository
 
 import android.content.ContentResolver
 import android.content.ContentUris
-import android.net.Uri
 import android.provider.MediaStore
 import com.nextgen.nxplayer.data.model.VideoItem
 
-class VideoRepository(private val contentResolver: ContentResolver) {
+enum class VideoSortType {
+    LATEST,
+    NAME,
+    SIZE,
+    DURATION
+}
 
-    fun getVideos(): List<VideoItem> {
+class VideoRepository(
+    private val contentResolver: ContentResolver
+) {
+
+    fun getVideos(sortType: VideoSortType = VideoSortType.LATEST): List<VideoItem> {
         val videos = mutableListOf<VideoItem>()
+
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
             MediaStore.Video.Media.DISPLAY_NAME,
             MediaStore.Video.Media.DURATION,
             MediaStore.Video.Media.SIZE,
-            MediaStore.Video.Media.DATE_ADDED
+            MediaStore.Video.Media.DATE_ADDED,
+            MediaStore.Video.Media.WIDTH,
+            MediaStore.Video.Media.HEIGHT
         )
-        val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
+
+        val sortOrder = when (sortType) {
+            VideoSortType.LATEST -> "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            VideoSortType.NAME -> "${MediaStore.Video.Media.DISPLAY_NAME} ASC"
+            VideoSortType.SIZE -> "${MediaStore.Video.Media.SIZE} DESC"
+            VideoSortType.DURATION -> "${MediaStore.Video.Media.DURATION} DESC"
+        }
 
         contentResolver.query(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
@@ -26,24 +43,46 @@ class VideoRepository(private val contentResolver: ContentResolver) {
             null,
             sortOrder
         )?.use { cursor ->
-            val idCol = cursor.getColumnIndex(MediaStore.Video.Media._ID)
-            val nameCol = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
-            val durationCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
-            val sizeCol = cursor.getColumnIndex(MediaStore.Video.Media.SIZE)
-            val dateCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
+
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+            val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
+            val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
 
             while (cursor.moveToNext()) {
-                val id = if (idCol >= 0) cursor.getLong(idCol) else -1L
-                if (id < 0) continue
-                val name = if (nameCol >= 0) cursor.getString(nameCol) ?: "Unknown" else "Unknown"
-                val duration = if (durationCol >= 0) cursor.getLong(durationCol) else 0L
-                val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
-                val dateAdded = if (dateCol >= 0) cursor.getLong(dateCol) else 0L
-                val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                val id = cursor.getLong(idCol)
+                val name = cursor.getString(nameCol) ?: "Unknown Video"
+                val duration = cursor.getLong(durationCol)
+                val size = cursor.getLong(sizeCol)
+                val dateAdded = cursor.getLong(dateCol)
+                val width = cursor.getInt(widthCol)
+                val height = cursor.getInt(heightCol)
 
-                videos.add(VideoItem(id, name, duration, uri, size, dateAdded))
+                if (duration <= 0L) continue
+
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    id
+                )
+
+                videos.add(
+                    VideoItem(
+                        id = id,
+                        name = name,
+                        duration = duration,
+                        uri = uri,
+                        size = size,
+                        dateAdded = dateAdded,
+                        width = width,
+                        height = height
+                    )
+                )
             }
         }
+
         return videos
     }
 }
