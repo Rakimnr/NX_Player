@@ -39,6 +39,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val abRepeatActive = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     val playerMessage = MutableStateFlow<String?>(null)
+    val showResumeDialog = MutableStateFlow(false)
+    var pendingResumePosition: Long = 0L
 
     data class SubtitleTrack(
         val id: Int,
@@ -147,7 +149,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             setMediaItem(mediaItem)
             setPlaybackSpeed(prefs.defaultSpeed)
             prepare()
-            playWhenReady = true
+            playWhenReady = false
         }
 
         startPositionTracking()
@@ -398,16 +400,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         showMessage("Subtitle: ${selectedTrack.name}")
     }
 
-    private fun loadResumeState(videoUri: String) {
+    private fun loadResumeState(uri: String) {
         viewModelScope.launch {
             val state = withContext(Dispatchers.IO) {
-                db.resumeDao().getResumeState(videoUri).firstOrNull()
+                db.resumeDao().getResumeState(uri).firstOrNull()
             }
 
             state?.let {
-                if (it.positionMs > 3000L) {
-                    seekTo(it.positionMs)
-                    showMessage("Resumed")
+                if (it.positionMs > 5000L) {
+                    pendingResumePosition = it.positionMs
+                    showResumeDialog.value = true
                 }
             }
         }
@@ -539,5 +541,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         releasePlayer()
         super.onCleared()
+    }
+
+    fun resumePlayback() {
+        exoPlayer?.seekTo(pendingResumePosition)
+        exoPlayer?.playWhenReady = true
+        exoPlayer?.play()
+        showResumeDialog.value = false
+    }
+
+    fun startFromBeginning() {
+        exoPlayer?.seekTo(0)
+        exoPlayer?.playWhenReady = true
+        exoPlayer?.play()
+        showResumeDialog.value = false
     }
 }

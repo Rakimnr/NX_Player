@@ -77,6 +77,7 @@ fun PlayerScreen(
     val abRepeatActive by viewModel.abRepeatActive.collectAsState()
     val playerMessage by viewModel.playerMessage.collectAsState()
     val bookmarks by viewModel.bookmarks.collectAsState()
+    val showResumeDialog by viewModel.showResumeDialog.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? Activity
@@ -167,6 +168,24 @@ fun PlayerScreen(
                 },
                 onVolumeChanged = { percent ->
                     viewModel.showMessage("Volume $percent%")
+                }
+            )
+        }
+
+        if (showResumeDialog) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Resume Video") },
+                text = { Text("Continue from where you left off?") },
+                confirmButton = {
+                    TextButton(onClick = { viewModel.resumePlayback() }) {
+                        Text("Resume")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { viewModel.startFromBeginning() }) {
+                        Text("Start Over")
+                    }
                 }
             )
         }
