@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Local SDK path
+local.properties
+
+# Generated APK/AAB
+*.apk
+*.aab
+output-metadata.json
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db
