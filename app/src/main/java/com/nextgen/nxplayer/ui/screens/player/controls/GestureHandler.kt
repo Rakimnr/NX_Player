@@ -22,7 +22,6 @@ fun GestureHandler(
                         if (offset.x < width / 3) playerViewModel.seekRelative(-10000)
                         else if (offset.x > 2 * width / 3) playerViewModel.seekRelative(10000)
                     },
-                    onLongPress = { playerViewModel.toggleKidsLock() }
                 )
             }
             .pointerInput(Unit) {

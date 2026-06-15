@@ -19,7 +19,6 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val prefs = remember { PreferencesManager(context) }
     var resumeEnabled by remember { mutableStateOf(prefs.resumePlayback) }
-    var audioBoost by remember { mutableStateOf(prefs.audioBoost) }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Settings") }) }
@@ -33,15 +32,7 @@ fun SettingsScreen() {
                     prefs.resumePlayback = it
                 })
             }
-            HorizontalDivider()
-            Text("Audio", style = MaterialTheme.typography.titleMedium)
-            Row {
-                Text("Audio boost")
-                Switch(checked = audioBoost, onCheckedChange = {
-                    audioBoost = it
-                    prefs.audioBoost = it
-                })
-            }
+
             HorizontalDivider()
             Text("Support", style = MaterialTheme.typography.titleMedium)
             Button(onClick = {

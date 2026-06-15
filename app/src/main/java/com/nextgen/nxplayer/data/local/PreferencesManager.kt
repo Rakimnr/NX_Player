@@ -16,10 +16,6 @@ class PreferencesManager(context: Context) {
         get() = prefs.getFloat("default_speed", 1.0f)
         set(value) = prefs.edit().putFloat("default_speed", value).apply()
 
-    var audioBoost: Boolean
-        get() = prefs.getBoolean("audio_boost", false)
-        set(value) = prefs.edit().putBoolean("audio_boost", value).apply()
-
     var subtitleFontSize: Float
         get() = prefs.getFloat("subtitle_font_size", 16f)
         set(value) = prefs.edit().putFloat("subtitle_font_size", value).apply()
@@ -32,7 +28,4 @@ class PreferencesManager(context: Context) {
         get() = prefs.getBoolean("kids_lock_disable_volume", true)
         set(value) = prefs.edit().putBoolean("kids_lock_disable_volume", value).apply()
 
-    var sleepTimerMinutes: Int
-        get() = prefs.getInt("sleep_timer", -1) // -1 = disabled
-        set(value) = prefs.edit().putInt("sleep_timer", value).apply()
 }

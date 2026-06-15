@@ -4,14 +4,11 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import com.nextgen.nxplayer.data.local.dao.BookmarkDao
 import com.nextgen.nxplayer.data.local.dao.ResumeDao
-import com.nextgen.nxplayer.data.model.Bookmark
 import com.nextgen.nxplayer.data.model.ResumeState
 
-@Database(entities = [Bookmark::class, ResumeState::class], version = 1, exportSchema = false)
+@Database(entities = [ResumeState::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
-    abstract fun bookmarkDao(): BookmarkDao
     abstract fun resumeDao(): ResumeDao
 
     companion object {

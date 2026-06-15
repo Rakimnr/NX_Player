@@ -254,6 +254,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun setKidsLock(value: Boolean) {
+        kidsLocked.value = value
+    }
+
+    fun isLocked(): Boolean = kidsLocked.value
+
     private fun updateSubtitleTracks() {
         val player = exoPlayer ?: return
         val currentTracks = player.currentTracks
