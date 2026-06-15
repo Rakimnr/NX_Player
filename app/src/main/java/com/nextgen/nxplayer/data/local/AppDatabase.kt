@@ -7,12 +7,18 @@ import androidx.room.RoomDatabase
 import com.nextgen.nxplayer.data.local.dao.ResumeDao
 import com.nextgen.nxplayer.data.model.ResumeState
 
-@Database(entities = [ResumeState::class], version = 2, exportSchema = false)
+@Database(
+    entities = [ResumeState::class],
+    version = 1,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
+
     abstract fun resumeDao(): ResumeDao
 
     companion object {
-        @Volatile private var INSTANCE: AppDatabase? = null
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -20,7 +26,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "nxplayer_db"
-                ).build().also { INSTANCE = it }
+                ).build().also {
+                    INSTANCE = it
+                }
             }
         }
     }

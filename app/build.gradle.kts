@@ -76,7 +76,7 @@ dependencies {
     // Activity / Lifecycle / Navigation
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.3")
     implementation("androidx.navigation:navigation-compose:2.7.7")
 
     // Media3 ExoPlayer
@@ -92,9 +92,6 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // Keep temporarily if your private lock/vault code still uses BiometricPrompt.
-    // If not used anywhere, remove later.
-    implementation("androidx.biometric:biometric:1.2.0-alpha05")
     // Image loading for video thumbnails
     implementation("io.coil-kt:coil-compose:2.6.0")
 }

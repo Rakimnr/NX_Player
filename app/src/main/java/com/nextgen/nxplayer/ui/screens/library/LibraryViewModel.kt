@@ -1,9 +1,6 @@
 package com.nextgen.nxplayer.ui.screens.library
 
-import android.Manifest
 import android.app.Application
-import android.content.pm.PackageManager
-import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.nextgen.nxplayer.data.model.VideoItem
@@ -13,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import com.nextgen.nxplayer.utils.PermissionHelper
 
 class LibraryViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -75,13 +73,6 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     private fun hasVideoPermission(): Boolean {
         val context = getApplication<Application>()
-
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_VIDEO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-
-        return context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+        return PermissionHelper.hasVideoPermission(context)
     }
 }
