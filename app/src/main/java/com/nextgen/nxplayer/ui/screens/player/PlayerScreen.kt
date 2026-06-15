@@ -11,18 +11,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bedtime
-import androidx.compose.material.icons.rounded.Bookmark
-import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.ClosedCaption
-import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Repeat
-import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -44,9 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.consumePositionChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -54,7 +43,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.ui.PlayerView
-import com.nextgen.nxplayer.data.model.Bookmark
 import com.nextgen.nxplayer.ui.screens.player.controls.PlaybackControls
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -74,9 +62,7 @@ fun PlayerScreen(
     val currentSpeed by viewModel.speed.collectAsState()
     val subtitleTracks by viewModel.subtitleTracks.collectAsState()
     val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsState()
-    val abRepeatActive by viewModel.abRepeatActive.collectAsState()
     val playerMessage by viewModel.playerMessage.collectAsState()
-    val bookmarks by viewModel.bookmarks.collectAsState()
     val showResumeDialog by viewModel.showResumeDialog.collectAsState()
 
     val context = LocalContext.current
@@ -88,8 +74,6 @@ fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
-    var showSleepTimerDialog by remember { mutableStateOf(false) }
-    var showBookmarkDialog by remember { mutableStateOf(false) }
 
     val subtitlePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -208,56 +192,6 @@ fun PlayerScreen(
                         Icon(
                             Icons.Rounded.ClosedCaption,
                             contentDescription = "Subtitles",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            viewModel.toggleAbRepeat()
-                        }
-                    ) {
-                        Icon(
-                            imageVector =
-                                if (abRepeatActive) Icons.Rounded.RepeatOne
-                                else Icons.Rounded.Repeat,
-                            contentDescription = "A-B Repeat",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            viewModel.addBookmark()
-                        }
-                    ) {
-                        Icon(
-                            Icons.Rounded.BookmarkAdd,
-                            contentDescription = "Add bookmark",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            showBookmarkDialog = true
-                        }
-                    ) {
-                        Icon(
-                            Icons.Rounded.Bookmark,
-                            contentDescription = "Bookmarks",
-                            tint = Color.White
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            showSleepTimerDialog = true
-                        }
-                    ) {
-                        Icon(
-                            Icons.Rounded.Bedtime,
-                            contentDescription = "Sleep timer",
                             tint = Color.White
                         )
                     }
@@ -396,34 +330,6 @@ fun PlayerScreen(
                 }
             )
         }
-
-        if (showBookmarkDialog) {
-            BookmarkDialog(
-                bookmarks = bookmarks,
-                onBookmarkClick = { bookmark ->
-                    viewModel.seekToBookmark(bookmark)
-                    showBookmarkDialog = false
-                },
-                onDeleteBookmark = { bookmark ->
-                    viewModel.deleteBookmark(bookmark)
-                },
-                onDismiss = {
-                    showBookmarkDialog = false
-                }
-            )
-        }
-
-        if (showSleepTimerDialog) {
-            SleepTimerDialog(
-                onTimerSelected = { minutes ->
-                    viewModel.setSleepTimer(minutes)
-                    showSleepTimerDialog = false
-                },
-                onDismiss = {
-                    showSleepTimerDialog = false
-                }
-            )
-        }
     }
 }
 
@@ -520,10 +426,8 @@ private fun MxGestureLayer(
                                     val deltaY = change.position.y - lastPosition.y
                                     val percentDelta = -deltaY / size.height.toFloat()
 
-                                    val window = activity?.window
-                                    val attrs = window?.attributes
-
-                                    if (attrs != null && window != null) {
+                                    activity?.window?.let { window ->
+                                        val attrs = window.attributes
                                         val currentBrightness =
                                             if (attrs.screenBrightness >= 0f) {
                                                 attrs.screenBrightness
@@ -583,7 +487,7 @@ private fun MxGestureLayer(
                             }
 
                             lastPosition = change.position
-                            change.consumePositionChange()
+                            change.consume()
                         }
                     }
                 }
@@ -783,109 +687,6 @@ fun SubtitleDialog(
                                     }
                             )
                         }
-                    }
-                }
-            }
-        },
-        confirmButton = {}
-    )
-}
-
-@Composable
-fun BookmarkDialog(
-    bookmarks: List<Bookmark>,
-    onBookmarkClick: (Bookmark) -> Unit,
-    onDeleteBookmark: (Bookmark) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text("Bookmarks")
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                if (bookmarks.isEmpty()) {
-                    Text(
-                        text = "No bookmarks yet.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                } else {
-                    bookmarks.forEach { bookmark ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TextButton(
-                                onClick = {
-                                    onBookmarkClick(bookmark)
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(bookmark.title)
-                            }
-
-                            IconButton(
-                                onClick = {
-                                    onDeleteBookmark(bookmark)
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Delete,
-                                    contentDescription = "Delete bookmark"
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = onDismiss
-            ) {
-                Text("Close")
-            }
-        }
-    )
-}
-
-@Composable
-fun SleepTimerDialog(
-    onTimerSelected: (Int) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val options = listOf(15, 30, 60, -1)
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text("Sleep Timer")
-        },
-        text = {
-            Column {
-                options.forEach { minutes ->
-                    TextButton(
-                        onClick = {
-                            onTimerSelected(minutes)
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text =
-                                if (minutes == -1) {
-                                    "Off"
-                                } else {
-                                    "$minutes min"
-                                }
-                        )
                     }
                 }
             }

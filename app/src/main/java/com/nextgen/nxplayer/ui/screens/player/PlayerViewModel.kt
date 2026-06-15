@@ -13,7 +13,6 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.exoplayer.ExoPlayer
 import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
-import com.nextgen.nxplayer.data.model.Bookmark
 import com.nextgen.nxplayer.data.model.ResumeState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,11 +34,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val currentPosition = MutableStateFlow(0L)
     val duration = MutableStateFlow(0L)
     val speed = MutableStateFlow(1.0f)
-    val kidsLocked = MutableStateFlow(false)
-    val abRepeatActive = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     val playerMessage = MutableStateFlow<String?>(null)
     val showResumeDialog = MutableStateFlow(false)
+    val kidsLocked = MutableStateFlow(false)
     var pendingResumePosition: Long = 0L
 
     data class SubtitleTrack(
@@ -55,16 +53,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _selectedSubtitleIndex = MutableStateFlow(-1)
     val selectedSubtitleIndex: StateFlow<Int> = _selectedSubtitleIndex
 
-    private val _bookmarks = MutableStateFlow<List<Bookmark>>(emptyList())
-    val bookmarks: StateFlow<List<Bookmark>> = _bookmarks
-
-    private var repeatA: Long? = null
-    private var repeatB: Long? = null
-
     private var positionJob: Job? = null
-    private var sleepTimerJob: Job? = null
     private var messageJob: Job? = null
-    private var bookmarkJob: Job? = null
 
     private val db = AppDatabase.getInstance(application)
     private val prefs = PreferencesManager(application)
@@ -135,7 +125,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         if (initializedUri == uriString) {
             startPositionTracking()
-            loadBookmarks(uriString)
             return
         }
 
@@ -149,12 +138,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             setMediaItem(mediaItem)
             setPlaybackSpeed(prefs.defaultSpeed)
             prepare()
-            playWhenReady = false
+            playWhenReady = true
         }
 
         startPositionTracking()
         loadResumeState(uriString)
-        loadBookmarks(uriString)
     }
 
     private fun buildMediaItem(videoUri: Uri): MediaItem {
@@ -212,13 +200,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
                 if (player != null) {
                     currentPosition.value = player.currentPosition
-
-                    val current = player.currentPosition
-                    val end = repeatB
-
-                    if (abRepeatActive.value && end != null && current >= end) {
-                        repeatA?.let { player.seekTo(it) }
-                    }
                 }
 
                 delay(300)
@@ -271,54 +252,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             showMessage("Controls unlocked")
         }
-    }
-
-    fun toggleAbRepeat() {
-        if (abRepeatActive.value) {
-            clearRepeat()
-            return
-        }
-
-        if (repeatA == null) {
-            setRepeatA()
-        } else {
-            setRepeatB()
-        }
-    }
-
-    fun setRepeatA() {
-        repeatA = exoPlayer?.currentPosition
-        repeatB = null
-        abRepeatActive.value = false
-        showMessage("A point set")
-    }
-
-    fun setRepeatB() {
-        repeatB = exoPlayer?.currentPosition
-
-        val a = repeatA
-        val b = repeatB
-
-        if (a == null || b == null) {
-            showMessage("Set A first")
-            return
-        }
-
-        if (b <= a + 1000L) {
-            showMessage("B must be after A")
-            repeatB = null
-            return
-        }
-
-        abRepeatActive.value = true
-        showMessage("A-B repeat active")
-    }
-
-    fun clearRepeat() {
-        repeatA = null
-        repeatB = null
-        abRepeatActive.value = false
-        showMessage("A-B repeat off")
     }
 
     private fun updateSubtitleTracks() {
@@ -410,6 +343,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 if (it.positionMs > 5000L) {
                     pendingResumePosition = it.positionMs
                     showResumeDialog.value = true
+                    exoPlayer?.pause()
                 }
             }
         }
@@ -426,81 +360,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     positionMs = pos
                 )
             )
-        }
-    }
-
-    private fun loadBookmarks(videoUri: String) {
-        bookmarkJob?.cancel()
-
-        bookmarkJob = viewModelScope.launch {
-            db.bookmarkDao()
-                .getBookmarksForVideo(videoUri)
-                .collect { savedBookmarks ->
-                    _bookmarks.value = savedBookmarks
-                }
-        }
-    }
-
-    fun addBookmark(note: String = "") {
-        val uri = currentVideoUri?.toString() ?: return
-        val pos = exoPlayer?.currentPosition ?: return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            db.bookmarkDao().insert(
-                Bookmark(
-                    videoUri = uri,
-                    title = formatBookmarkTitle(pos),
-                    positionMs = pos,
-                    note = note
-                )
-            )
-        }
-
-        showMessage("Bookmark added")
-    }
-
-    fun deleteBookmark(bookmark: Bookmark) {
-        viewModelScope.launch(Dispatchers.IO) {
-            db.bookmarkDao().delete(bookmark)
-        }
-
-        showMessage("Bookmark deleted")
-    }
-
-    fun seekToBookmark(bookmark: Bookmark) {
-        seekTo(bookmark.positionMs)
-        showMessage(bookmark.title)
-    }
-
-    private fun formatBookmarkTitle(positionMs: Long): String {
-        val totalSeconds = positionMs / 1000
-        val hours = totalSeconds / 3600
-        val minutes = (totalSeconds % 3600) / 60
-        val seconds = totalSeconds % 60
-
-        val time = if (hours > 0) {
-            "%d:%02d:%02d".format(hours, minutes, seconds)
-        } else {
-            "%d:%02d".format(minutes, seconds)
-        }
-
-        return "Bookmark $time"
-    }
-
-    fun setSleepTimer(minutes: Int) {
-        sleepTimerJob?.cancel()
-
-        if (minutes <= 0) {
-            showMessage("Sleep timer off")
-            return
-        }
-
-        showMessage("Sleep timer: $minutes min")
-
-        sleepTimerJob = viewModelScope.launch {
-            delay(minutes * 60_000L)
-            exoPlayer?.pause()
-            showMessage("Sleep timer finished")
         }
     }
 
@@ -521,14 +380,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         positionJob?.cancel()
         positionJob = null
 
-        sleepTimerJob?.cancel()
-        sleepTimerJob = null
-
         messageJob?.cancel()
         messageJob = null
-
-        bookmarkJob?.cancel()
-        bookmarkJob = null
 
         exoPlayer?.release()
         exoPlayer = null
