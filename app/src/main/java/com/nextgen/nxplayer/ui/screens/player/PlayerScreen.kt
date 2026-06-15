@@ -9,8 +9,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ClosedCaption
 import androidx.compose.material.icons.rounded.Lock
@@ -20,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -35,9 +45,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
@@ -47,6 +61,7 @@ import com.nextgen.nxplayer.ui.screens.player.controls.PlaybackControls
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 @Composable
 fun PlayerScreen(
@@ -62,18 +77,21 @@ fun PlayerScreen(
     val currentSpeed by viewModel.speed.collectAsState()
     val subtitleTracks by viewModel.subtitleTracks.collectAsState()
     val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsState()
+    val audioTracks by viewModel.audioTracks.collectAsState()
+    val selectedAudioIndex by viewModel.selectedAudioIndex.collectAsState()
     val playerMessage by viewModel.playerMessage.collectAsState()
     val showResumeDialog by viewModel.showResumeDialog.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? Activity
-    val audioManager = remember {
-        context.getSystemService(AudioManager::class.java)
-    }
+    val audioManager = remember { context.getSystemService(AudioManager::class.java) }
+    val hapticFeedback = LocalHapticFeedback.current
 
     var controlsVisible by remember { mutableStateOf(true) }
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
+    var showAudioDialog by remember { mutableStateOf(false) }
+    var zoomScale by remember { mutableStateOf(1f) }
 
     val subtitlePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -84,7 +102,8 @@ fun PlayerScreen(
                     it,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-            } catch (_: Exception) {
+            } catch (_: SecurityException) {
+                // Some providers do not support persistable URI permissions.
             }
 
             viewModel.loadExternalSubtitle(it)
@@ -92,6 +111,8 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(uri) {
+        controlsVisible = true
+        zoomScale = 1f
         viewModel.initializePlayer(uri)
     }
 
@@ -104,7 +125,9 @@ fun PlayerScreen(
     LaunchedEffect(isPlaying, controlsVisible, kidsLocked) {
         if (isPlaying && controlsVisible && !kidsLocked) {
             delay(3000)
-            controlsVisible = false
+            if (isPlaying && controlsVisible && !kidsLocked) {
+                controlsVisible = false
+            }
         }
     }
 
@@ -124,7 +147,12 @@ fun PlayerScreen(
             update = { playerView ->
                 playerView.player = viewModel.getPlayer()
             },
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                }
         )
 
         if (!kidsLocked) {
@@ -135,13 +163,16 @@ fun PlayerScreen(
                     controlsVisible = !controlsVisible
                 },
                 onDoubleTapLeft = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.seekRelative(-10_000L)
                 },
                 onDoubleTapRight = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.seekRelative(10_000L)
                 },
-                onLongPress = {
-                    viewModel.toggleKidsLock()
+                onLongPressCenter = {
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    viewModel.lockControls()
                     controlsVisible = false
                 },
                 onSeek = { delta ->
@@ -152,6 +183,14 @@ fun PlayerScreen(
                 },
                 onVolumeChanged = { percent ->
                     viewModel.showMessage("Volume $percent%")
+                },
+                onZoomChanged = { zoomChange ->
+                    val oldZoom = zoomScale
+                    zoomScale = (zoomScale * zoomChange).coerceIn(1f, 3f)
+
+                    if (abs(oldZoom - zoomScale) >= 0.03f) {
+                        viewModel.showMessage("Zoom ${(zoomScale * 100f).roundToInt()}%")
+                    }
                 }
             )
         }
@@ -182,12 +221,28 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    horizontalArrangement = Arrangement.End
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
-                        onClick = {
-                            showSubtitleDialog = true
+                    if (zoomScale > 1.01f) {
+                        TextButton(
+                            onClick = {
+                                zoomScale = 1f
+                                viewModel.showMessage("Zoom reset")
+                            }
+                        ) {
+                            Text("Reset zoom", color = Color.White)
                         }
+                    }
+
+                    TextButton(
+                        onClick = { showAudioDialog = true }
+                    ) {
+                        Text("Audio", color = Color.White)
+                    }
+
+                    IconButton(
+                        onClick = { showSubtitleDialog = true }
                     ) {
                         Icon(
                             Icons.Rounded.ClosedCaption,
@@ -197,12 +252,10 @@ fun PlayerScreen(
                     }
 
                     IconButton(
-                        onClick = {
-                            showSpeedDialog = true
-                        }
+                        onClick = { showSpeedDialog = true }
                     ) {
                         Text(
-                            text = "${currentSpeed}x",
+                            text = "${formatSpeed(currentSpeed)}x",
                             color = Color.White,
                             style = MaterialTheme.typography.labelMedium
                         )
@@ -210,7 +263,7 @@ fun PlayerScreen(
 
                     IconButton(
                         onClick = {
-                            viewModel.toggleKidsLock()
+                            viewModel.lockControls()
                             controlsVisible = false
                         }
                     ) {
@@ -226,25 +279,17 @@ fun PlayerScreen(
 
                 PlaybackControls(
                     isPlaying = isPlaying,
-                    onPlayPause = {
-                        viewModel.playPause()
-                    },
-                    onSkipNext = {
-                        viewModel.showMessage("Next video not added yet")
-                    },
-                    onSkipPrevious = {
-                        viewModel.showMessage("Previous video not added yet")
-                    }
+                    onPlayPause = { viewModel.playPause() },
+                    onSkipNext = { viewModel.showMessage("Next video not added yet") },
+                    onSkipPrevious = { viewModel.showMessage("Previous video not added yet") }
                 )
 
                 Slider(
-                    value =
-                        if (duration > 0L) {
-                            (currentPosition.toFloat() / duration.toFloat())
-                                .coerceIn(0f, 1f)
-                        } else {
-                            0f
-                        },
+                    value = if (duration > 0L) {
+                        (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    },
                     onValueChange = { progress ->
                         if (duration > 0L) {
                             viewModel.seekTo((progress * duration).toLong())
@@ -283,7 +328,8 @@ fun PlayerScreen(
         if (kidsLocked) {
             LockedPlayerOverlay(
                 onUnlock = {
-                    viewModel.toggleKidsLock()
+                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    viewModel.unlockControls()
                     controlsVisible = true
                 }
             )
@@ -296,9 +342,7 @@ fun PlayerScreen(
                     viewModel.setSpeed(selectedSpeed)
                     showSpeedDialog = false
                 },
-                onDismiss = {
-                    showSpeedDialog = false
-                }
+                onDismiss = { showSpeedDialog = false }
             )
         }
 
@@ -313,6 +357,7 @@ fun PlayerScreen(
                             "application/x-subrip",
                             "text/plain",
                             "text/vtt",
+                            "application/ttml+xml",
                             "*/*"
                         )
                     )
@@ -325,9 +370,23 @@ fun PlayerScreen(
                     viewModel.selectSubtitleTrack(-1)
                     showSubtitleDialog = false
                 },
-                onDismiss = {
-                    showSubtitleDialog = false
-                }
+                onDismiss = { showSubtitleDialog = false }
+            )
+        }
+
+        if (showAudioDialog) {
+            AudioTrackDialog(
+                tracks = audioTracks.map { it.name },
+                selectedIndex = selectedAudioIndex,
+                onTrackSelected = { index ->
+                    viewModel.selectAudioTrack(index)
+                    showAudioDialog = false
+                },
+                onAuto = {
+                    viewModel.selectAudioTrack(-1)
+                    showAudioDialog = false
+                },
+                onDismiss = { showAudioDialog = false }
             )
         }
     }
@@ -340,10 +399,11 @@ private fun MxGestureLayer(
     onSingleTap: () -> Unit,
     onDoubleTapLeft: () -> Unit,
     onDoubleTapRight: () -> Unit,
-    onLongPress: () -> Unit,
+    onLongPressCenter: () -> Unit,
     onSeek: (Long) -> Unit,
     onBrightnessChanged: (Int) -> Unit,
-    onVolumeChanged: (Int) -> Unit
+    onVolumeChanged: (Int) -> Unit,
+    onZoomChanged: (Float) -> Unit
 ) {
     var lastTapTime by remember { mutableLongStateOf(0L) }
 
@@ -357,14 +417,37 @@ private fun MxGestureLayer(
                     val startX = down.position.x
                     val startY = down.position.y
                     var lastPosition = down.position
-
                     var dragged = false
                     var dragMode = DragMode.NONE
-
+                    var previousPinchDistance: Float? = null
                     val startTime = down.uptimeMillis
 
                     while (true) {
                         val event = awaitPointerEvent()
+                        val pressedChanges = event.changes.filter { it.pressed }
+
+                        if (pressedChanges.size >= 2) {
+                            val first = pressedChanges[0].position
+                            val second = pressedChanges[1].position
+                            val pinchDistance = distanceBetween(first, second)
+                            val previousDistance = previousPinchDistance
+
+                            dragged = true
+                            dragMode = DragMode.ZOOM
+
+                            if (previousDistance != null && previousDistance > 0f) {
+                                val zoomChange = (pinchDistance / previousDistance).coerceIn(0.85f, 1.15f)
+
+                                if (abs(zoomChange - 1f) > 0.01f) {
+                                    onZoomChanged(zoomChange)
+                                }
+                            }
+
+                            previousPinchDistance = pinchDistance
+                            event.changes.forEach { it.consume() }
+                            continue
+                        }
+
                         val change = event.changes.firstOrNull { it.id == down.id }
                             ?: event.changes.firstOrNull()
                             ?: break
@@ -375,14 +458,14 @@ private fun MxGestureLayer(
                             val totalDx = change.position.x - startX
                             val totalDy = change.position.y - startY
 
-                            if (!dragged && totalTime > 450L) {
-                                onLongPress()
+                            if (!dragged && totalTime > 450L && isCenterThird(startX, size.width)) {
+                                onLongPressCenter()
                             } else if (!dragged && abs(totalDx) < 25f && abs(totalDy) < 25f) {
                                 if (releaseTime - lastTapTime < 300L) {
-                                    if (startX < size.width / 2f) {
-                                        onDoubleTapLeft()
-                                    } else {
-                                        onDoubleTapRight()
+                                    when {
+                                        startX < size.width / 3f -> onDoubleTapLeft()
+                                        startX > size.width * 2f / 3f -> onDoubleTapRight()
+                                        else -> onSingleTap()
                                     }
                                     lastTapTime = 0L
                                 } else {
@@ -399,15 +482,13 @@ private fun MxGestureLayer(
 
                         if (!dragged && (abs(dx) > 35f || abs(dy) > 35f)) {
                             dragged = true
-
-                            dragMode =
-                                if (abs(dx) > abs(dy)) {
-                                    DragMode.SEEK
-                                } else if (startX < size.width / 2f) {
-                                    DragMode.BRIGHTNESS
-                                } else {
-                                    DragMode.VOLUME
-                                }
+                            dragMode = if (abs(dx) > abs(dy)) {
+                                DragMode.SEEK
+                            } else if (startX < size.width / 2f) {
+                                DragMode.BRIGHTNESS
+                            } else {
+                                DragMode.VOLUME
+                            }
                         }
 
                         if (dragged) {
@@ -436,38 +517,31 @@ private fun MxGestureLayer(
                                             }
 
                                         val newBrightness =
-                                            (currentBrightness + percentDelta)
-                                                .coerceIn(0.01f, 1.0f)
+                                            (currentBrightness + percentDelta).coerceIn(0.01f, 1.0f)
 
                                         attrs.screenBrightness = newBrightness
                                         window.attributes = attrs
 
-                                        onBrightnessChanged(
-                                            (newBrightness * 100f).roundToInt()
-                                        )
+                                        onBrightnessChanged((newBrightness * 100f).roundToInt())
                                     }
                                 }
 
                                 DragMode.VOLUME -> {
-                                    val maxVolume =
-                                        audioManager?.getStreamMaxVolume(
-                                            AudioManager.STREAM_MUSIC
-                                        ) ?: 15
+                                    val maxVolume = audioManager?.getStreamMaxVolume(
+                                        AudioManager.STREAM_MUSIC
+                                    ) ?: 15
 
-                                    val currentVolume =
-                                        audioManager?.getStreamVolume(
-                                            AudioManager.STREAM_MUSIC
-                                        ) ?: 0
+                                    val currentVolume = audioManager?.getStreamVolume(
+                                        AudioManager.STREAM_MUSIC
+                                    ) ?: 0
 
                                     val deltaY = change.position.y - lastPosition.y
                                     val volumeDelta =
-                                        (-deltaY / size.height.toFloat() * maxVolume)
-                                            .roundToInt()
+                                        (-deltaY / size.height.toFloat() * maxVolume).roundToInt()
 
                                     if (volumeDelta != 0) {
                                         val newVolume =
-                                            (currentVolume + volumeDelta)
-                                                .coerceIn(0, maxVolume)
+                                            (currentVolume + volumeDelta).coerceIn(0, maxVolume)
 
                                         audioManager?.setStreamVolume(
                                             AudioManager.STREAM_MUSIC,
@@ -475,14 +549,18 @@ private fun MxGestureLayer(
                                             0
                                         )
 
-                                        val percent =
+                                        val percent = if (maxVolume > 0) {
                                             ((newVolume.toFloat() / maxVolume.toFloat()) * 100f)
                                                 .roundToInt()
+                                        } else {
+                                            0
+                                        }
 
                                         onVolumeChanged(percent)
                                     }
                                 }
 
+                                DragMode.ZOOM,
                                 DragMode.NONE -> Unit
                             }
 
@@ -499,13 +577,12 @@ private enum class DragMode {
     NONE,
     SEEK,
     BRIGHTNESS,
-    VOLUME
+    VOLUME,
+    ZOOM
 }
 
 @Composable
-private fun PlayerFeedbackOverlay(
-    message: String
-) {
+private fun PlayerFeedbackOverlay(message: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -523,19 +600,42 @@ private fun PlayerFeedbackOverlay(
 }
 
 @Composable
-private fun LockedPlayerOverlay(
-    onUnlock: () -> Unit
-) {
+private fun LockedPlayerOverlay(onUnlock: () -> Unit) {
+    var unlockProgress by remember { mutableStateOf(0f) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.45f))
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onLongPress = {
-                        onUnlock()
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val startTime = down.uptimeMillis
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: event.changes.firstOrNull()
+                            ?: break
+
+                        if (!change.pressed) {
+                            unlockProgress = 0f
+                            break
+                        }
+
+                        val elapsed = change.uptimeMillis - startTime
+                        unlockProgress = (elapsed / 3000f).coerceIn(0f, 1f)
+
+                        if (unlockProgress >= 1f) {
+                            unlockProgress = 0f
+                            onUnlock()
+                            event.changes.forEach { it.consume() }
+                            break
+                        }
+
+                        change.consume()
                     }
-                )
+                }
             },
         contentAlignment = Alignment.Center
     ) {
@@ -560,8 +660,15 @@ private fun LockedPlayerOverlay(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Long press to unlock",
+                    text = "Press and hold for 3 seconds to unlock",
                     style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                LinearProgressIndicator(
+                    progress = unlockProgress,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
@@ -581,31 +688,31 @@ fun SpeedDialog(
         1.0f,
         1.25f,
         1.5f,
-        2.0f
+        1.75f,
+        2.0f,
+        2.5f,
+        3.0f,
+        3.5f,
+        4.0f
     )
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("Playback Speed")
-        },
+        title = { Text("Playback Speed") },
         text = {
             Column {
                 speeds.forEach { speed ->
                     TextButton(
-                        onClick = {
-                            onSpeedSelected(speed)
-                        },
+                        onClick = { onSpeedSelected(speed) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "${speed}x",
-                            color =
-                                if (speed == currentSpeed) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    Color.Unspecified
-                                }
+                            text = "${formatSpeed(speed)}x",
+                            color = if (abs(speed - currentSpeed) < 0.001f) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Unspecified
+                            }
                         )
                     }
                 }
@@ -626,9 +733,7 @@ fun SubtitleDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Text("Subtitles")
-        },
+        title = { Text("Subtitles") },
         text = {
             Column {
                 Button(
@@ -653,12 +758,11 @@ fun SubtitleDialog(
                 ) {
                     Text(
                         text = "Off",
-                        color =
-                            if (selectedIndex == -1) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                Color.Unspecified
-                            }
+                        color = if (selectedIndex == -1) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            Color.Unspecified
+                        }
                     )
                 }
 
@@ -672,19 +776,73 @@ fun SubtitleDialog(
                 } else {
                     tracks.forEachIndexed { index, track ->
                         TextButton(
-                            onClick = {
-                                onTrackSelected(index)
-                            },
+                            onClick = { onTrackSelected(index) },
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
                                 text = track,
-                                color =
-                                    if (index == selectedIndex) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        Color.Unspecified
-                                    }
+                                color = if (index == selectedIndex) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Unspecified
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {}
+    )
+}
+
+@Composable
+fun AudioTrackDialog(
+    tracks: List<String>,
+    selectedIndex: Int,
+    onTrackSelected: (Int) -> Unit,
+    onAuto: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Audio Track") },
+        text = {
+            Column {
+                TextButton(
+                    onClick = onAuto,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Auto",
+                        color = if (selectedIndex == -1) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            Color.Unspecified
+                        }
+                    )
+                }
+
+                if (tracks.isEmpty()) {
+                    Text(
+                        text = "No separate audio tracks found.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                } else {
+                    tracks.forEachIndexed { index, track ->
+                        TextButton(
+                            onClick = { onTrackSelected(index) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = track,
+                                color = if (index == selectedIndex) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Unspecified
+                                }
                             )
                         }
                     }
@@ -696,7 +854,8 @@ fun SubtitleDialog(
 }
 
 fun formatPlayerTime(milliseconds: Long): String {
-    val totalSeconds = milliseconds / 1000
+    val safeMilliseconds = milliseconds.coerceAtLeast(0L)
+    val totalSeconds = safeMilliseconds / 1000
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
@@ -706,4 +865,22 @@ fun formatPlayerTime(milliseconds: Long): String {
     } else {
         "%d:%02d".format(minutes, seconds)
     }
+}
+
+private fun formatSpeed(speed: Float): String {
+    return if (speed % 1f == 0f) {
+        speed.toInt().toString()
+    } else {
+        speed.toString().trimEnd('0').trimEnd('.')
+    }
+}
+
+private fun isCenterThird(x: Float, width: Int): Boolean {
+    return x >= width / 3f && x <= width * 2f / 3f
+}
+
+private fun distanceBetween(first: Offset, second: Offset): Float {
+    val dx = first.x - second.x
+    val dy = first.y - second.y
+    return sqrt(dx * dx + dy * dy)
 }

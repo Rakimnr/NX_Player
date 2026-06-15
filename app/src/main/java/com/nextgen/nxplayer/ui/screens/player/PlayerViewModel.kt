@@ -10,10 +10,12 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
 import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.data.model.ResumeState
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -38,20 +40,27 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val playerMessage = MutableStateFlow<String?>(null)
     val showResumeDialog = MutableStateFlow(false)
     val kidsLocked = MutableStateFlow(false)
-    var pendingResumePosition: Long = 0L
 
-    data class SubtitleTrack(
+    private var pendingResumePosition: Long = 0L
+
+    data class MediaTrack(
         val id: Int,
         val name: String,
         val groupIndex: Int,
         val trackIndex: Int
     )
 
-    private val _subtitleTracks = MutableStateFlow<List<SubtitleTrack>>(emptyList())
-    val subtitleTracks: StateFlow<List<SubtitleTrack>> = _subtitleTracks
+    private val _subtitleTracks = MutableStateFlow<List<MediaTrack>>(emptyList())
+    val subtitleTracks: StateFlow<List<MediaTrack>> = _subtitleTracks
 
     private val _selectedSubtitleIndex = MutableStateFlow(-1)
     val selectedSubtitleIndex: StateFlow<Int> = _selectedSubtitleIndex
+
+    private val _audioTracks = MutableStateFlow<List<MediaTrack>>(emptyList())
+    val audioTracks: StateFlow<List<MediaTrack>> = _audioTracks
+
+    private val _selectedAudioIndex = MutableStateFlow(-1)
+    val selectedAudioIndex: StateFlow<Int> = _selectedAudioIndex
 
     private var positionJob: Job? = null
     private var messageJob: Job? = null
@@ -82,7 +91,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playerListenerAdded = true
 
         player.addListener(object : Player.Listener {
-
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 isPlaying.value = isPlayingNow
             }
@@ -91,10 +99,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 when (playbackState) {
                     Player.STATE_READY -> {
                         val playerDuration = player.duration
-                        duration.value =
-                            if (playerDuration != C.TIME_UNSET) playerDuration else 0L
-
-                        updateSubtitleTracks()
+                        duration.value = if (playerDuration != C.TIME_UNSET) playerDuration else 0L
+                        updateAvailableTracks()
                     }
 
                     Player.STATE_ENDED -> {
@@ -104,8 +110,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
 
-            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                updateSubtitleTracks()
+            override fun onTracksChanged(tracks: Tracks) {
+                updateAvailableTracks()
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -129,20 +135,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         initializedUri = uriString
+        externalSubtitleUri = findSidecarSubtitle(videoUri)
         errorMessage.value = null
-        speed.value = prefs.defaultSpeed
+        showResumeDialog.value = false
+        currentPosition.value = 0L
+        duration.value = 0L
+        speed.value = prefs.defaultSpeed.coerceIn(0.25f, 4.0f)
+        kidsLocked.value = false
+        _subtitleTracks.value = emptyList()
+        _selectedSubtitleIndex.value = -1
+        _audioTracks.value = emptyList()
+        _selectedAudioIndex.value = -1
 
         val mediaItem = buildMediaItem(videoUri)
 
         player.apply {
             setMediaItem(mediaItem)
-            setPlaybackSpeed(prefs.defaultSpeed)
+            setPlaybackSpeed(speed.value)
             prepare()
             playWhenReady = true
         }
 
         startPositionTracking()
         loadResumeState(uriString)
+
+        externalSubtitleUri?.let {
+            showMessage("Subtitle auto-loaded")
+        }
     }
 
     private fun buildMediaItem(videoUri: Uri): MediaItem {
@@ -153,7 +172,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(subtitleUri)
                 .setMimeType(detectSubtitleMimeType(subtitleUri))
-                .setLanguage("en")
+                .setLanguage("und")
                 .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .build()
 
@@ -165,14 +184,34 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun detectSubtitleMimeType(uri: Uri): String {
-        val text = uri.toString().lowercase()
+        val text = uri.toString().substringBefore('?').lowercase()
 
         return when {
             text.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
             text.endsWith(".vtt") -> MimeTypes.TEXT_VTT
             text.endsWith(".ass") || text.endsWith(".ssa") -> MimeTypes.TEXT_SSA
+            text.endsWith(".ttml") || text.endsWith(".dfxp") || text.endsWith(".xml") -> {
+                MimeTypes.APPLICATION_TTML
+            }
             else -> MimeTypes.APPLICATION_SUBRIP
         }
+    }
+
+    private fun findSidecarSubtitle(videoUri: Uri): Uri? {
+        if (videoUri.scheme != "file") return null
+
+        val path = videoUri.path ?: return null
+        val videoFile = File(path)
+        val folder = videoFile.parentFile ?: return null
+        val baseName = videoFile.nameWithoutExtension
+
+        val supportedExtensions = listOf("srt", "vtt", "ass", "ssa", "ttml", "dfxp", "xml")
+
+        return supportedExtensions
+            .asSequence()
+            .map { extension -> File(folder, "$baseName.$extension") }
+            .firstOrNull { subtitleFile -> subtitleFile.exists() && subtitleFile.canRead() }
+            ?.let { subtitleFile -> Uri.fromFile(subtitleFile) }
     }
 
     fun loadExternalSubtitle(subtitleUri: Uri) {
@@ -199,7 +238,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val player = exoPlayer
 
                 if (player != null) {
-                    currentPosition.value = player.currentPosition
+                    currentPosition.value = player.currentPosition.coerceAtLeast(0L)
+
+                    val playerDuration = player.duration
+                    if (playerDuration != C.TIME_UNSET && playerDuration > 0L) {
+                        duration.value = playerDuration
+                    }
                 }
 
                 delay(300)
@@ -219,14 +263,23 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun seekTo(positionMs: Long) {
         val player = exoPlayer ?: return
-        val safePosition = positionMs.coerceAtLeast(0L)
+        val maxDuration = duration.value.takeIf { it > 0L } ?: player.duration.takeIf {
+            it != C.TIME_UNSET && it > 0L
+        }
+
+        val safePosition = if (maxDuration != null) {
+            positionMs.coerceIn(0L, maxDuration)
+        } else {
+            positionMs.coerceAtLeast(0L)
+        }
+
         player.seekTo(safePosition)
         currentPosition.value = safePosition
     }
 
     fun seekRelative(deltaMs: Long) {
         val player = exoPlayer ?: return
-        val newPosition = (player.currentPosition + deltaMs).coerceAtLeast(0L)
+        val newPosition = player.currentPosition + deltaMs
         seekTo(newPosition)
 
         if (deltaMs > 0) {
@@ -241,66 +294,124 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         exoPlayer?.setPlaybackSpeed(safeSpeed)
         speed.value = safeSpeed
         prefs.defaultSpeed = safeSpeed
-        showMessage("${safeSpeed}x")
+        showMessage("${formatSpeedForMessage(safeSpeed)}x")
     }
 
     fun toggleKidsLock() {
-        kidsLocked.value = !kidsLocked.value
-
         if (kidsLocked.value) {
-            showMessage("Controls locked")
+            unlockControls()
         } else {
-            showMessage("Controls unlocked")
+            lockControls()
         }
     }
 
+    fun lockControls() {
+        kidsLocked.value = true
+        showMessage("Controls locked")
+    }
+
+    fun unlockControls() {
+        kidsLocked.value = false
+        showMessage("Controls unlocked")
+    }
+
     fun setKidsLock(value: Boolean) {
-        kidsLocked.value = value
+        if (value) {
+            lockControls()
+        } else {
+            unlockControls()
+        }
     }
 
     fun isLocked(): Boolean = kidsLocked.value
 
-    private fun updateSubtitleTracks() {
+    private fun updateAvailableTracks() {
         val player = exoPlayer ?: return
         val currentTracks = player.currentTracks
 
-        val tracks = mutableListOf<SubtitleTrack>()
-        var selectedIndex = -1
+        val textTracks = mutableListOf<MediaTrack>()
+        val soundTracks = mutableListOf<MediaTrack>()
+        var selectedTextIndex = -1
+        var selectedSoundIndex = -1
 
         currentTracks.groups.forEachIndexed { groupIndex, group ->
-            if (group.type == C.TRACK_TYPE_TEXT) {
-                for (trackIndex in 0 until group.length) {
-                    if (group.isTrackSupported(trackIndex)) {
-                        val format = group.getTrackFormat(trackIndex)
+            when (group.type) {
+                C.TRACK_TYPE_TEXT -> {
+                    for (trackIndex in 0 until group.length) {
+                        if (group.isTrackSupported(trackIndex)) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val track = MediaTrack(
+                                id = textTracks.size,
+                                name = buildTrackName(
+                                    label = format.label,
+                                    language = format.language,
+                                    fallback = "Subtitle ${textTracks.size + 1}"
+                                ),
+                                groupIndex = groupIndex,
+                                trackIndex = trackIndex
+                            )
 
-                        val language = format.language
-                            ?.uppercase()
-                            ?.takeIf { it.isNotBlank() }
+                            if (group.isTrackSelected(trackIndex)) {
+                                selectedTextIndex = track.id
+                            }
 
-                        val label = format.label
-                            ?.takeIf { it.isNotBlank() }
-
-                        val name = label ?: language ?: "Subtitle ${tracks.size + 1}"
-
-                        val subtitleTrack = SubtitleTrack(
-                            id = tracks.size,
-                            name = name,
-                            groupIndex = groupIndex,
-                            trackIndex = trackIndex
-                        )
-
-                        if (group.isTrackSelected(trackIndex)) {
-                            selectedIndex = subtitleTrack.id
+                            textTracks.add(track)
                         }
+                    }
+                }
 
-                        tracks.add(subtitleTrack)
+                C.TRACK_TYPE_AUDIO -> {
+                    for (trackIndex in 0 until group.length) {
+                        if (group.isTrackSupported(trackIndex)) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val channelInfo = when (format.channelCount) {
+                                1 -> "Mono"
+                                2 -> "Stereo"
+                                C.LENGTH_UNSET -> null
+                                else -> "${format.channelCount} ch"
+                            }
+
+                            val name = buildTrackName(
+                                label = format.label,
+                                language = format.language,
+                                fallback = "Audio ${soundTracks.size + 1}"
+                            )
+
+                            val track = MediaTrack(
+                                id = soundTracks.size,
+                                name = listOfNotNull(name, channelInfo).joinToString(" • "),
+                                groupIndex = groupIndex,
+                                trackIndex = trackIndex
+                            )
+
+                            if (group.isTrackSelected(trackIndex)) {
+                                selectedSoundIndex = track.id
+                            }
+
+                            soundTracks.add(track)
+                        }
                     }
                 }
             }
         }
 
-        _subtitleTracks.value = tracks
-        _selectedSubtitleIndex.value = selectedIndex
+        _subtitleTracks.value = textTracks
+        _selectedSubtitleIndex.value = selectedTextIndex
+        _audioTracks.value = soundTracks
+        _selectedAudioIndex.value = selectedSoundIndex
+    }
+
+    private fun buildTrackName(
+        label: String?,
+        language: String?,
+        fallback: String
+    ): String {
+        val cleanLabel = label?.takeIf { it.isNotBlank() }
+        val cleanLanguage = language
+            ?.uppercase()
+            ?.takeIf { it.isNotBlank() && it != "UND" }
+
+        return cleanLabel ?: cleanLanguage ?: fallback
     }
 
     fun selectSubtitleTrack(index: Int) {
@@ -339,6 +450,42 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         showMessage("Subtitle: ${selectedTrack.name}")
     }
 
+    fun selectAudioTrack(index: Int) {
+        val player = exoPlayer ?: return
+
+        if (index < 0) {
+            player.trackSelectionParameters =
+                player.trackSelectionParameters
+                    .buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                    .build()
+
+            _selectedAudioIndex.value = -1
+            showMessage("Audio: Auto")
+            return
+        }
+
+        val selectedTrack = _audioTracks.value.getOrNull(index) ?: return
+        val trackGroup = player.currentTracks.groups.getOrNull(selectedTrack.groupIndex) ?: return
+
+        val override = TrackSelectionOverride(
+            trackGroup.mediaTrackGroup,
+            listOf(selectedTrack.trackIndex)
+        )
+
+        player.trackSelectionParameters =
+            player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                .addOverride(override)
+                .build()
+
+        _selectedAudioIndex.value = index
+        showMessage("Audio: ${selectedTrack.name}")
+    }
+
     private fun loadResumeState(uri: String) {
         viewModelScope.launch {
             val state = withContext(Dispatchers.IO) {
@@ -358,12 +505,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun saveResumeState() {
         val uri = currentVideoUri?.toString() ?: return
         val pos = exoPlayer?.currentPosition ?: 0L
+        val maxDuration = duration.value
+
+        if (pos <= 1000L) return
+
+        val safePosition = if (maxDuration > 0L && pos >= maxDuration - 3000L) {
+            0L
+        } else {
+            pos
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             db.resumeDao().saveResumeState(
                 ResumeState(
                     videoUri = uri,
-                    positionMs = pos
+                    positionMs = safePosition
                 )
             )
         }
@@ -371,7 +527,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun showMessage(message: String) {
         messageJob?.cancel()
-
         playerMessage.value = message
 
         messageJob = viewModelScope.launch {
@@ -395,6 +550,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playerListenerAdded = false
         initializedUri = null
         isPlaying.value = false
+        duration.value = 0L
+        currentPosition.value = 0L
     }
 
     override fun onCleared() {
@@ -414,5 +571,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         exoPlayer?.playWhenReady = true
         exoPlayer?.play()
         showResumeDialog.value = false
+    }
+
+    private fun formatSpeedForMessage(value: Float): String {
+        return if (value % 1f == 0f) {
+            value.toInt().toString()
+        } else {
+            value.toString().trimEnd('0').trimEnd('.')
+        }
     }
 }
