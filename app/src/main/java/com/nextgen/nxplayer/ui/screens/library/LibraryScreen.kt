@@ -1,12 +1,25 @@
 package com.nextgen.nxplayer.ui.screens.library
 
 import android.Manifest
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -16,8 +29,26 @@ import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Sort
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,35 +77,41 @@ fun LibraryScreen(
     var showSortMenu by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val granted = permissions.values.any { it }
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
         viewModel.onPermissionResult(granted)
     }
 
-    fun requestVideoPermission() {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.READ_MEDIA_VIDEO)
-        } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    val singleVideoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        uri?.let {
+            onVideoClick(createPickedVideoItem(it))
         }
+    }
 
-        permissionLauncher.launch(permissions)
+    fun requestVideoLibraryPermission() {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_VIDEO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        permissionLauncher.launch(permission)
+    }
+
+    fun openSingleVideoWithoutLibraryPermission() {
+        singleVideoPicker.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+        )
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text("NX Player")
-                },
+                title = { Text("NX Player") },
                 actions = {
                     Box {
-                        IconButton(
-                            onClick = {
-                                showSortMenu = true
-                            }
-                        ) {
+                        IconButton(onClick = { showSortMenu = true }) {
                             Icon(
                                 imageVector = Icons.Rounded.Sort,
                                 contentDescription = "Sort"
@@ -83,9 +120,7 @@ fun LibraryScreen(
 
                         DropdownMenu(
                             expanded = showSortMenu,
-                            onDismissRequest = {
-                                showSortMenu = false
-                            }
+                            onDismissRequest = { showSortMenu = false }
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Latest") },
@@ -125,29 +160,21 @@ fun LibraryScreen(
                         }
                     }
 
-                    IconButton(
-                        onClick = {
-                            viewModel.loadVideos()
-                        }
-                    ) {
+                    IconButton(onClick = { viewModel.loadVideos() }) {
                         Icon(
                             imageVector = Icons.Rounded.Refresh,
                             contentDescription = "Refresh"
                         )
                     }
 
-                    IconButton(
-                        onClick = onPrivacyClick
-                    ) {
+                    IconButton(onClick = onPrivacyClick) {
                         Icon(
                             imageVector = Icons.Rounded.PrivacyTip,
                             contentDescription = "Privacy"
                         )
                     }
 
-                    IconButton(
-                        onClick = onSettingsClick
-                    ) {
+                    IconButton(onClick = onSettingsClick) {
                         Icon(
                             imageVector = Icons.Rounded.Settings,
                             contentDescription = "Settings"
@@ -157,16 +184,14 @@ fun LibraryScreen(
             )
         }
     ) { padding ->
-
         when {
             !permissionGranted -> {
                 PermissionRequiredScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding),
-                    onGrantPermission = {
-                        requestVideoPermission()
-                    }
+                    onGrantPermission = { requestVideoLibraryPermission() },
+                    onPickSingleVideo = { openSingleVideoWithoutLibraryPermission() }
                 )
             }
 
@@ -186,9 +211,8 @@ fun LibraryScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding),
-                    onRefresh = {
-                        viewModel.loadVideos()
-                    }
+                    onRefresh = { viewModel.loadVideos() },
+                    onPickSingleVideo = { openSingleVideoWithoutLibraryPermission() }
                 )
             }
 
@@ -209,9 +233,7 @@ fun LibraryScreen(
                     ) { video ->
                         VideoItemCard(
                             video = video,
-                            onClick = {
-                                onVideoClick(video)
-                            }
+                            onClick = { onVideoClick(video) }
                         )
                     }
                 }
@@ -223,7 +245,8 @@ fun LibraryScreen(
 @Composable
 private fun PermissionRequiredScreen(
     modifier: Modifier = Modifier,
-    onGrantPermission: () -> Unit
+    onGrantPermission: () -> Unit,
+    onPickSingleVideo: () -> Unit
 ) {
     Box(
         modifier = modifier.padding(24.dp),
@@ -242,24 +265,28 @@ private fun PermissionRequiredScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "Allow video access",
+                text = "Choose how to open videos",
                 style = MaterialTheme.typography.titleLarge
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "NX Player needs access to your local videos so it can show and play files stored on your device.",
+                text = "Grant video access to show your full local video library, or open one video using the system picker without giving full library access.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            Button(
-                onClick = onGrantPermission
-            ) {
-                Text("Grant Permission")
+            Button(onClick = onGrantPermission) {
+                Text("Show Full Library")
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedButton(onClick = onPickSingleVideo) {
+                Text("Open One Video")
             }
         }
     }
@@ -268,7 +295,8 @@ private fun PermissionRequiredScreen(
 @Composable
 private fun EmptyLibraryScreen(
     modifier: Modifier = Modifier,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onPickSingleVideo: () -> Unit
 ) {
     Box(
         modifier = modifier.padding(24.dp),
@@ -294,17 +322,23 @@ private fun EmptyLibraryScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Tap refresh after adding videos to your device.",
+                text = "Tap refresh after adding videos, or open a single video without scanning the full library.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            OutlinedButton(
-                onClick = onRefresh
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Refresh")
+                OutlinedButton(onClick = onRefresh) {
+                    Text("Refresh")
+                }
+
+                Button(onClick = onPickSingleVideo) {
+                    Text("Open Video")
+                }
             }
         }
     }
@@ -318,9 +352,7 @@ fun VideoItemCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
-                onClick()
-            },
+            .clickable { onClick() },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
@@ -386,7 +418,22 @@ fun VideoItemCard(
     }
 }
 
+private fun createPickedVideoItem(uri: Uri): VideoItem {
+    return VideoItem(
+        id = uri.toString().hashCode().toLong(),
+        name = uri.lastPathSegment ?: "Selected video",
+        duration = 0L,
+        uri = uri,
+        size = 0L,
+        dateAdded = 0L,
+        width = 0,
+        height = 0
+    )
+}
+
 fun formatDuration(millis: Long): String {
+    if (millis <= 0L) return "--:--"
+
     val totalSeconds = millis / 1000
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60

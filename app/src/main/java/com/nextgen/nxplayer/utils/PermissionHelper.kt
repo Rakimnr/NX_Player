@@ -16,6 +16,14 @@ object PermissionHelper {
         }
     }
 
+    fun videoPermissionDisplayName(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            "READ_MEDIA_VIDEO"
+        } else {
+            "READ_EXTERNAL_STORAGE"
+        }
+    }
+
     fun hasVideoPermission(context: Context): Boolean {
         return ContextCompat.checkSelfPermission(
             context,
