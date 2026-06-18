@@ -1,9 +1,12 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.nextgen.nxplayer.ui.screens.player
+
 
 import android.app.Activity
 import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -31,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,10 +56,18 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.nextgen.nxplayer.ui.screens.player.controls.PlaybackControls
 import kotlinx.coroutines.delay
@@ -66,10 +78,12 @@ import kotlin.math.sqrt
 @Composable
 fun PlayerScreen(
     videoUri: String,
+    onBack: () -> Unit,
     viewModel: PlayerViewModel = viewModel()
 ) {
     val uri = remember(videoUri) { videoUri.toUri() }
 
+    val videoTitle by viewModel.videoTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val currentPosition by viewModel.currentPosition.collectAsState()
     val duration by viewModel.duration.collectAsState()
@@ -81,9 +95,14 @@ fun PlayerScreen(
     val selectedAudioIndex by viewModel.selectedAudioIndex.collectAsState()
     val playerMessage by viewModel.playerMessage.collectAsState()
     val showResumeDialog by viewModel.showResumeDialog.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
+    val aspectMode by viewModel.aspectMode.collectAsState()
+    val hasNextVideo by viewModel.hasNextVideo.collectAsState()
+    val hasPreviousVideo by viewModel.hasPreviousVideo.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? Activity
+    val lifecycleOwner = LocalLifecycleOwner.current
     val audioManager = remember { context.getSystemService(AudioManager::class.java) }
     val hapticFeedback = LocalHapticFeedback.current
 
@@ -110,22 +129,70 @@ fun PlayerScreen(
         }
     }
 
+    fun leavePlayer() {
+        viewModel.pauseAndSaveForExit()
+        onBack()
+    }
+
+    BackHandler(enabled = true) {
+        when {
+            showAudioDialog -> showAudioDialog = false
+            showSubtitleDialog -> showSubtitleDialog = false
+            showSpeedDialog -> showSpeedDialog = false
+            kidsLocked -> {
+                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                viewModel.unlockControls()
+                controlsVisible = true
+            }
+            else -> leavePlayer()
+        }
+    }
+
+    DisposableEffect(activity) {
+        val window = activity?.window
+        if (window == null) {
+            onDispose { }
+        } else {
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+            onDispose {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+            }
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE,
+                Lifecycle.Event.ON_STOP -> viewModel.saveCurrentPosition()
+                else -> Unit
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.saveCurrentPosition()
+        }
+    }
+
     LaunchedEffect(uri) {
         controlsVisible = true
         zoomScale = 1f
         viewModel.initializePlayer(uri)
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            viewModel.releasePlayer()
-        }
-    }
-
-    LaunchedEffect(isPlaying, controlsVisible, kidsLocked) {
-        if (isPlaying && controlsVisible && !kidsLocked) {
+    LaunchedEffect(isPlaying, controlsVisible, kidsLocked, errorMessage) {
+        if (isPlaying && controlsVisible && !kidsLocked && errorMessage == null) {
             delay(3000)
-            if (isPlaying && controlsVisible && !kidsLocked) {
+            if (isPlaying && controlsVisible && !kidsLocked && errorMessage == null) {
                 controlsVisible = false
             }
         }
@@ -142,10 +209,12 @@ fun PlayerScreen(
                     player = viewModel.getPlayer()
                     useController = false
                     keepScreenOn = true
+                    resizeMode = aspectMode.toResizeMode()
                 }
             },
             update = { playerView ->
                 playerView.player = viewModel.getPlayer()
+                playerView.resizeMode = aspectMode.toResizeMode()
             },
             modifier = Modifier
                 .fillMaxSize()
@@ -155,7 +224,7 @@ fun PlayerScreen(
                 }
         )
 
-        if (!kidsLocked) {
+        if (!kidsLocked && errorMessage == null) {
             MxGestureLayer(
                 activity = activity,
                 audioManager = audioManager,
@@ -195,7 +264,7 @@ fun PlayerScreen(
             )
         }
 
-        if (showResumeDialog) {
+        if (showResumeDialog && errorMessage == null) {
             AlertDialog(
                 onDismissRequest = {},
                 title = { Text("Resume Video") },
@@ -213,7 +282,7 @@ fun PlayerScreen(
             )
         }
 
-        if (controlsVisible && !kidsLocked) {
+        if (controlsVisible && !kidsLocked && errorMessage == null) {
             Column(
                 modifier = Modifier.fillMaxSize()
             ) {
@@ -221,9 +290,18 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    horizontalArrangement = Arrangement.End,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Text(
+                        text = videoTitle.ifBlank { "Video" },
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
                     if (zoomScale > 1.01f) {
                         TextButton(
                             onClick = {
@@ -235,15 +313,15 @@ fun PlayerScreen(
                         }
                     }
 
-                    TextButton(
-                        onClick = { showAudioDialog = true }
-                    ) {
+                    TextButton(onClick = { viewModel.cycleAspectMode() }) {
+                        Text(aspectMode.label, color = Color.White)
+                    }
+
+                    TextButton(onClick = { showAudioDialog = true }) {
                         Text("Audio", color = Color.White)
                     }
 
-                    IconButton(
-                        onClick = { showSubtitleDialog = true }
-                    ) {
+                    IconButton(onClick = { showSubtitleDialog = true }) {
                         Icon(
                             Icons.Rounded.ClosedCaption,
                             contentDescription = "Subtitles",
@@ -251,9 +329,7 @@ fun PlayerScreen(
                         )
                     }
 
-                    IconButton(
-                        onClick = { showSpeedDialog = true }
-                    ) {
+                    IconButton(onClick = { showSpeedDialog = true }) {
                         Text(
                             text = "${formatSpeed(currentSpeed)}x",
                             color = Color.White,
@@ -279,9 +355,11 @@ fun PlayerScreen(
 
                 PlaybackControls(
                     isPlaying = isPlaying,
+                    canSkipPrevious = hasPreviousVideo,
+                    canSkipNext = hasNextVideo,
                     onPlayPause = { viewModel.playPause() },
-                    onSkipNext = { viewModel.showMessage("Next video not added yet") },
-                    onSkipPrevious = { viewModel.showMessage("Previous video not added yet") }
+                    onSkipNext = { viewModel.skipToNextVideo() },
+                    onSkipPrevious = { viewModel.skipToPreviousVideo() }
                 )
 
                 Slider(
@@ -319,6 +397,14 @@ fun PlayerScreen(
                     )
                 }
             }
+        }
+
+        errorMessage?.let { message ->
+            PlayerErrorOverlay(
+                message = message,
+                onRetry = { viewModel.retryCurrent() },
+                onBack = { leavePlayer() }
+            )
         }
 
         playerMessage?.let {
@@ -392,6 +478,14 @@ fun PlayerScreen(
     }
 }
 
+private fun PlayerAspectMode.toResizeMode(): Int {
+    return when (this) {
+        PlayerAspectMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        PlayerAspectMode.CROP -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        PlayerAspectMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+    }
+}
+
 @Composable
 private fun MxGestureLayer(
     activity: Activity?,
@@ -437,10 +531,7 @@ private fun MxGestureLayer(
 
                             if (previousDistance != null && previousDistance > 0f) {
                                 val zoomChange = (pinchDistance / previousDistance).coerceIn(0.85f, 1.15f)
-
-                                if (abs(zoomChange - 1f) > 0.01f) {
-                                    onZoomChanged(zoomChange)
-                                }
+                                onZoomChanged(zoomChange)
                             }
 
                             previousPinchDistance = pinchDistance
@@ -454,11 +545,11 @@ private fun MxGestureLayer(
 
                         if (!change.pressed) {
                             val releaseTime = change.uptimeMillis
-                            val totalTime = releaseTime - startTime
                             val totalDx = change.position.x - startX
                             val totalDy = change.position.y - startY
+                            val heldTime = releaseTime - startTime
 
-                            if (!dragged && totalTime > 450L && isCenterThird(startX, size.width)) {
+                            if (!dragged && heldTime >= 550L && isCenterThird(startX, size.width)) {
                                 onLongPressCenter()
                             } else if (!dragged && abs(totalDx) < 25f && abs(totalDy) < 25f) {
                                 if (releaseTime - lastTapTime < 300L) {
@@ -579,6 +670,52 @@ private enum class DragMode {
     BRIGHTNESS,
     VOLUME,
     ZOOM
+}
+
+@Composable
+private fun PlayerErrorOverlay(
+    message: String,
+    onRetry: () -> Unit,
+    onBack: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.65f))
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Can't play this video",
+                    style = MaterialTheme.typography.titleLarge
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onBack) {
+                        Text("Back")
+                    }
+
+                    Button(onClick = onRetry) {
+                        Text("Retry")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

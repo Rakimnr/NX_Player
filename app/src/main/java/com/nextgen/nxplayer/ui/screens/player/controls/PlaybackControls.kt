@@ -1,6 +1,9 @@
 package com.nextgen.nxplayer.ui.screens.player.controls
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -15,6 +18,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun PlaybackControls(
     isPlaying: Boolean,
+    canSkipPrevious: Boolean,
+    canSkipNext: Boolean,
     onPlayPause: () -> Unit,
     onSkipNext: () -> Unit,
     onSkipPrevious: () -> Unit
@@ -25,17 +30,25 @@ fun PlaybackControls(
             .padding(8.dp),
         horizontalArrangement = Arrangement.Center
     ) {
-        IconButton(onClick = onSkipPrevious) {
-            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous")
+        IconButton(
+            onClick = onSkipPrevious,
+            enabled = canSkipPrevious
+        ) {
+            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous video")
         }
+
         IconButton(onClick = onPlayPause) {
             Icon(
                 if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                 contentDescription = if (isPlaying) "Pause" else "Play"
             )
         }
-        IconButton(onClick = onSkipNext) {
-            Icon(Icons.Rounded.SkipNext, contentDescription = "Next")
+
+        IconButton(
+            onClick = onSkipNext,
+            enabled = canSkipNext
+        ) {
+            Icon(Icons.Rounded.SkipNext, contentDescription = "Next video")
         }
     }
 }

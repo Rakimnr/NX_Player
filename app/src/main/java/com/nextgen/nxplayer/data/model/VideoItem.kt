@@ -24,4 +24,12 @@ data class VideoItem(
                 else -> "HD"
             }
         }
+    fun getSafeTitle(): String {
+        val raw = uri.lastPathSegment ?: return "Unknown Video"
+
+        return raw
+            .substringAfterLast('/')
+            .substringBeforeLast('.')
+            .ifBlank { "Unknown Video" }
+    }
 }

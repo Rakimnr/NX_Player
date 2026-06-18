@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings as AndroidSettings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -104,7 +105,7 @@ private const val PULL_REFRESH_TRIGGER_DISTANCE = 180f
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
-    onVideoClick: (VideoItem) -> Unit,
+    onVideoClick: (VideoItem, List<VideoItem>) -> Unit,
     onSettingsClick: () -> Unit,
     onPrivacyClick: () -> Unit,
     viewModel: LibraryViewModel = viewModel()
@@ -141,7 +142,8 @@ fun LibraryScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         uri?.let {
-            onVideoClick(createPickedVideoItem(it))
+            val pickedVideo = createPickedVideoItem(context, it)
+            onVideoClick(pickedVideo, listOf(pickedVideo))
         }
     }
 
@@ -285,7 +287,7 @@ fun LibraryScreen(
                     isLoading = isLoading,
                     onSearchChange = viewModel::updateSearchQuery,
                     onRefresh = viewModel::refreshVideos,
-                    onVideoClick = onVideoClick,
+                    onVideoClick = { video -> onVideoClick(video, videos) },
                     onVideoInfo = { infoVideo = it },
                     onShareVideo = { shareVideo(context, it) },
                     onDeleteVideo = { deleteCandidate = it },
@@ -301,7 +303,7 @@ fun LibraryScreen(
             onDismiss = { infoVideo = null },
             onPlay = {
                 infoVideo = null
-                onVideoClick(video)
+                onVideoClick(video, videos)
             },
             onShare = { shareVideo(context, video) }
         )
@@ -1045,10 +1047,15 @@ private fun InfoRow(
     }
 }
 
-private fun createPickedVideoItem(uri: Uri): VideoItem {
+private fun createPickedVideoItem(context: Context, uri: Uri): VideoItem {
+    val displayName = queryPickedVideoName(context, uri)
+        ?: Uri.decode(uri.lastPathSegment ?: "Selected video")
+            .substringAfterLast('/')
+            .ifBlank { "Selected video" }
+
     return VideoItem(
         id = uri.toString().hashCode().toLong(),
-        name = uri.lastPathSegment ?: "Selected video",
+        name = displayName,
         duration = 0L,
         uri = uri,
         size = 0L,
@@ -1056,6 +1063,25 @@ private fun createPickedVideoItem(uri: Uri): VideoItem {
         width = 0,
         height = 0
     )
+}
+
+private fun queryPickedVideoName(context: Context, uri: Uri): String? {
+    return runCatching {
+        context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) {
+                cursor.getString(nameIndex)?.takeIf { it.isNotBlank() }
+            } else {
+                null
+            }
+        }
+    }.getOrNull()
 }
 
 private fun shareVideo(context: Context, video: VideoItem) {
