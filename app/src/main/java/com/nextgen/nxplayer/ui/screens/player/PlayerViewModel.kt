@@ -290,7 +290,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         startPositionTracking()
         updateQueueState()
-        loadResumeState(selectedItem.uri)
+        if (prefs.resumePlayback) {
+            loadResumeState(selectedItem.uri)
+        }
 
         externalSubtitleUri?.let {
             showMessage("Subtitle auto-loaded")

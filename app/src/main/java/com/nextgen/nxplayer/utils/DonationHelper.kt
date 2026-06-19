@@ -1,16 +1,17 @@
 package com.nextgen.nxplayer.utils
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
+import android.widget.Toast
 
 object DonationHelper {
-    private const val DONATION_URL = "https://www.buymeacoffee.com/nxplayer"
 
-    fun openDonationPage(context: Context) {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(DONATION_URL))
-        if (intent.resolveActivity(context.packageManager) != null) {
-            context.startActivity(intent)
-        }
+    const val DONATION_ENABLED: Boolean = false
+
+    fun showDonationDisabledMessage(context: Context) {
+        Toast.makeText(
+            context,
+            "Donations are disabled until Google Play Billing is ready.",
+            Toast.LENGTH_LONG
+        ).show()
     }
 }
