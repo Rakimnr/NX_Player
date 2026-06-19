@@ -1,7 +1,11 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.nextgen.nxplayer.ui.screens.player
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.core.net.toUri
@@ -16,6 +20,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.data.model.ResumeState
@@ -95,7 +100,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val id: Int,
         val name: String,
         val groupIndex: Int,
-        val trackIndex: Int
+        val trackIndex: Int,
+        val stableKey: String
     )
 
     private val _subtitleTracks = MutableStateFlow<List<MediaTrack>>(emptyList())
@@ -124,6 +130,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _selectedAudioIndex = MutableStateFlow(-1)
     val selectedAudioIndex: StateFlow<Int> = _selectedAudioIndex
+
+    private val _audioBoostEnabled = MutableStateFlow(loadSavedAudioBoostEnabled())
+    val audioBoostEnabled: StateFlow<Boolean> = _audioBoostEnabled
+
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var currentAudioSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+    private var audioPreferenceAppliedForUri: String? = null
 
     private var positionJob: Job? = null
     private var messageJob: Job? = null
@@ -173,6 +186,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         duration.value = if (playerDuration != C.TIME_UNSET) playerDuration else 0L
                         updateAvailableTracks()
                         updateQueueState()
+                        applyAudioBoostToCurrentSession(showFailure = false)
                     }
 
                     Player.STATE_ENDED -> {
@@ -184,8 +198,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 syncCurrentQueueItemFromPlayer()
+                audioPreferenceAppliedForUri = null
                 updateAvailableTracks()
                 updateQueueState()
+                applyAudioBoostToCurrentSession(showFailure = false)
             }
 
             override fun onTracksChanged(tracks: Tracks) {
@@ -197,6 +213,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 showMessage("Playback error")
                 isPlaying.value = false
                 saveResumeState()
+            }
+        })
+
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioSessionIdChanged(
+                eventTime: AnalyticsListener.EventTime,
+                audioSessionId: Int
+            ) {
+                currentAudioSessionId = audioSessionId
+                applyAudioBoostToCurrentSession(showFailure = false)
             }
         })
     }
@@ -234,6 +260,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         duration.value = 0L
         speed.value = prefs.defaultSpeed.coerceIn(0.25f, 4.0f)
         kidsLocked.value = false
+        audioPreferenceAppliedForUri = null
         resetTrackState()
 
         val mediaItems = currentQueue.map { queuedVideo ->
@@ -256,6 +283,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             playWhenReady = true
         }
         applySubtitleEnabledFlag(player)
+        applyAudioBoostToCurrentSession(showFailure = false)
         if (shouldPrepareExternalSubtitleForPlayback()) {
             replaceCurrentMediaItemWithSubtitle()
         }
@@ -706,6 +734,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         externalSubtitleUri = null
         externalSubtitleLabel = null
         _externalSubtitleName.value = null
+        audioPreferenceAppliedForUri = null
         resetTrackState()
     }
 
@@ -778,7 +807,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     fallback = "Subtitle ${textTracks.size + 1}"
                                 ),
                                 groupIndex = groupIndex,
-                                trackIndex = trackIndex
+                                trackIndex = trackIndex,
+                                stableKey = buildTrackStableKey(
+                                    label = format.label,
+                                    language = format.language,
+                                    sampleMimeType = format.sampleMimeType,
+                                    channelCount = format.channelCount,
+                                    sampleRate = format.sampleRate,
+                                    bitrate = format.bitrate,
+                                    trackIndex = trackIndex
+                                )
                             )
 
                             if (group.isTrackSelected(trackIndex)) {
@@ -800,18 +838,34 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                 C.LENGTH_UNSET -> null
                                 else -> "${format.channelCount} ch"
                             }
+                            val sampleRateInfo = format.sampleRate
+                                .takeIf { it > 0 }
+                                ?.let { "${it / 1000} kHz" }
 
-                            val name = buildTrackName(
+                            val baseName = buildTrackName(
                                 label = format.label,
                                 language = format.language,
                                 fallback = "Audio ${soundTracks.size + 1}"
                             )
 
+                            val stableKey = buildTrackStableKey(
+                                label = format.label,
+                                language = format.language,
+                                sampleMimeType = format.sampleMimeType,
+                                channelCount = format.channelCount,
+                                sampleRate = format.sampleRate,
+                                bitrate = format.bitrate,
+                                trackIndex = trackIndex
+                            )
+
                             val track = MediaTrack(
                                 id = soundTracks.size,
-                                name = listOfNotNull(name, channelInfo).joinToString(" • "),
+                                name = listOfNotNull(baseName, channelInfo, sampleRateInfo)
+                                    .distinct()
+                                    .joinToString(" • "),
                                 groupIndex = groupIndex,
-                                trackIndex = trackIndex
+                                trackIndex = trackIndex,
+                                stableKey = stableKey
                             )
 
                             if (group.isTrackSelected(trackIndex)) {
@@ -828,7 +882,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _subtitleTracks.value = textTracks
         _selectedSubtitleIndex.value = if (_subtitlesEnabled.value) selectedTextIndex else -1
         _audioTracks.value = soundTracks
-        _selectedAudioIndex.value = selectedSoundIndex
+
+        val restoredIndex = restoreSavedAudioTrackIfNeeded(player, soundTracks)
+        _selectedAudioIndex.value = restoredIndex ?: if (isCurrentAudioPreferenceAuto()) {
+            -1
+        } else {
+            selectedSoundIndex
+        }
     }
 
     private fun buildTrackName(
@@ -836,12 +896,93 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         language: String?,
         fallback: String
     ): String {
-        val cleanLabel = label?.takeIf { it.isNotBlank() }
+        val cleanLabel = label?.trim()?.takeIf { it.isNotBlank() }
         val cleanLanguage = language
+            ?.trim()
             ?.uppercase()
             ?.takeIf { it.isNotBlank() && it != "UND" }
 
         return cleanLabel ?: cleanLanguage ?: fallback
+    }
+
+    private fun buildTrackStableKey(
+        label: String?,
+        language: String?,
+        sampleMimeType: String?,
+        channelCount: Int,
+        sampleRate: Int,
+        bitrate: Int,
+        trackIndex: Int
+    ): String {
+        return listOf(
+            label?.trim().orEmpty(),
+            language?.trim().orEmpty(),
+            sampleMimeType.orEmpty(),
+            channelCount.toString(),
+            sampleRate.toString(),
+            bitrate.toString(),
+            trackIndex.toString()
+        ).joinToString("|")
+    }
+
+    private fun restoreSavedAudioTrackIfNeeded(
+        player: ExoPlayer,
+        tracks: List<MediaTrack>
+    ): Int? {
+        val uriKey = currentVideoUri?.toString() ?: return null
+        if (audioPreferenceAppliedForUri == uriKey) return null
+
+        audioPreferenceAppliedForUri = uriKey
+        val savedKey = appPrefs.getString(audioPreferenceKeyFor(uriKey), null)
+
+        if (savedKey == null || savedKey == AUDIO_TRACK_AUTO) {
+            clearAudioTrackOverride(player)
+            return null
+        }
+
+        val savedIndex = tracks.indexOfFirst { it.stableKey == savedKey }
+        if (savedIndex < 0) {
+            clearAudioTrackOverride(player)
+            return null
+        }
+
+        applyAudioTrackOverride(player, tracks[savedIndex])
+        return savedIndex
+    }
+
+    private fun clearAudioTrackOverride(player: ExoPlayer) {
+        player.trackSelectionParameters =
+            player.trackSelectionParameters
+                .buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .build()
+    }
+
+    private fun applyAudioTrackOverride(player: ExoPlayer, track: MediaTrack) {
+        val trackGroup = player.currentTracks.groups.getOrNull(track.groupIndex) ?: return
+        val override = TrackSelectionOverride(
+            trackGroup.mediaTrackGroup,
+            listOf(track.trackIndex)
+        )
+
+        player.trackSelectionParameters =
+            player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                .addOverride(override)
+                .build()
+    }
+
+    private fun isCurrentAudioPreferenceAuto(): Boolean {
+        val uriKey = currentVideoUri?.toString() ?: return true
+        val savedKey = appPrefs.getString(audioPreferenceKeyFor(uriKey), null)
+        return savedKey == null || savedKey == AUDIO_TRACK_AUTO
+    }
+
+    private fun audioPreferenceKeyFor(uri: String): String {
+        return "$KEY_AUDIO_TRACK_PREFIX${uri.hashCode()}"
     }
 
     fun setSubtitlesEnabled(enabled: Boolean, showToast: Boolean = true) {
@@ -956,38 +1097,98 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectAudioTrack(index: Int) {
         val player = exoPlayer ?: return
+        val uriKey = currentVideoUri?.toString()
 
         if (index < 0) {
-            player.trackSelectionParameters =
-                player.trackSelectionParameters
-                    .buildUpon()
-                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-                    .build()
-
+            clearAudioTrackOverride(player)
+            uriKey?.let {
+                appPrefs.edit()
+                    .putString(audioPreferenceKeyFor(it), AUDIO_TRACK_AUTO)
+                    .apply()
+            }
+            audioPreferenceAppliedForUri = uriKey
             _selectedAudioIndex.value = -1
             showMessage("Audio: Auto")
             return
         }
 
         val selectedTrack = _audioTracks.value.getOrNull(index) ?: return
-        val trackGroup = player.currentTracks.groups.getOrNull(selectedTrack.groupIndex) ?: return
+        applyAudioTrackOverride(player, selectedTrack)
 
-        val override = TrackSelectionOverride(
-            trackGroup.mediaTrackGroup,
-            listOf(selectedTrack.trackIndex)
-        )
-
-        player.trackSelectionParameters =
-            player.trackSelectionParameters
-                .buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                .addOverride(override)
-                .build()
-
+        uriKey?.let {
+            appPrefs.edit()
+                .putString(audioPreferenceKeyFor(it), selectedTrack.stableKey)
+                .apply()
+        }
+        audioPreferenceAppliedForUri = uriKey
         _selectedAudioIndex.value = index
         showMessage("Audio: ${selectedTrack.name}")
+    }
+
+    fun setAudioBoostEnabled(enabled: Boolean) {
+        _audioBoostEnabled.value = enabled
+        appPrefs.edit().putBoolean(KEY_AUDIO_BOOST_ENABLED, enabled).apply()
+        val applied = applyAudioBoostToCurrentSession(showFailure = enabled)
+
+        when {
+            !enabled -> showMessage("Audio boost off")
+            applied -> showMessage("Audio boost on")
+        }
+    }
+
+    fun toggleAudioBoost() {
+        setAudioBoostEnabled(!_audioBoostEnabled.value)
+    }
+
+    private fun applyAudioBoostToCurrentSession(showFailure: Boolean): Boolean {
+        val player = exoPlayer ?: return false
+        releaseAudioBoostEffect()
+
+        if (!_audioBoostEnabled.value) {
+            player.volume = 1f
+            return true
+        }
+
+        val sessionId = currentAudioSessionId
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) {
+            if (showFailure) showMessage("Audio boost will apply after playback starts")
+            return false
+        }
+
+        val result = runCatching {
+            LoudnessEnhancer(sessionId).apply {
+                setTargetGain(AUDIO_BOOST_GAIN_MB)
+                enabled = true
+            }
+        }
+
+        result.onSuccess { enhancer ->
+            loudnessEnhancer = enhancer
+        }.onFailure {
+            if (showFailure) showMessage("Audio boost is not supported on this device")
+        }
+
+        return result.isSuccess
+    }
+
+    private fun releaseAudioBoostEffect() {
+        runCatching {
+            loudnessEnhancer?.enabled = false
+            loudnessEnhancer?.release()
+        }
+        loudnessEnhancer = null
+    }
+
+    fun createSystemEqualizerIntent(): Intent? {
+        if (exoPlayer == null) return null
+        val sessionId = currentAudioSessionId
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) return null
+
+        return Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
+            putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+            putExtra(AudioEffect.EXTRA_PACKAGE_NAME, getApplication<Application>().packageName)
+            putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MOVIE)
+        }
     }
 
     private fun loadResumeState(uri: String) {
@@ -1060,11 +1261,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         subtitleReloadJob?.cancel()
         subtitleReloadJob = null
 
+        releaseAudioBoostEffect()
+
         exoPlayer?.release()
         exoPlayer = null
 
         playerListenerAdded = false
         initializedUri = null
+        audioPreferenceAppliedForUri = null
+        currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
         isPlaying.value = false
         duration.value = 0L
         currentPosition.value = 0L
@@ -1132,6 +1337,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrDefault(SubtitleEncodingOption.AUTO)
     }
 
+    private fun loadSavedAudioBoostEnabled(): Boolean {
+        return appPrefs.getBoolean(KEY_AUDIO_BOOST_ENABLED, false)
+    }
+
     private fun formatOffsetForMessage(offsetMs: Long): String {
         if (offsetMs == 0L) return "0.0s"
 
@@ -1157,6 +1366,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_SUBTITLE_BG_OPACITY = "player_subtitle_background_opacity"
         private const val KEY_SUBTITLE_OFFSET_MS = "player_subtitle_offset_ms"
         private const val KEY_SUBTITLE_ENCODING = "player_subtitle_encoding"
+        private const val KEY_AUDIO_TRACK_PREFIX = "player_audio_track_"
+        private const val KEY_AUDIO_BOOST_ENABLED = "player_audio_boost_enabled"
+        private const val AUDIO_TRACK_AUTO = "AUTO"
+        private const val AUDIO_BOOST_GAIN_MB = 800
         private const val MIN_SUBTITLE_OFFSET_MS = -60_000L
         private const val MAX_SUBTITLE_OFFSET_MS = 60_000L
     }

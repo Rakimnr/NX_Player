@@ -99,6 +99,7 @@ fun PlayerScreen(
     val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsState()
     val audioTracks by viewModel.audioTracks.collectAsState()
     val selectedAudioIndex by viewModel.selectedAudioIndex.collectAsState()
+    val audioBoostEnabled by viewModel.audioBoostEnabled.collectAsState()
     val playerMessage by viewModel.playerMessage.collectAsState()
     val showResumeDialog by viewModel.showResumeDialog.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
@@ -137,6 +138,20 @@ fun PlayerScreen(
             }
 
             viewModel.loadExternalSubtitle(it)
+        }
+    }
+
+    fun openSystemEqualizer() {
+        val intent = viewModel.createSystemEqualizerIntent()
+        if (intent == null) {
+            viewModel.showMessage("System equalizer unavailable")
+            return
+        }
+
+        runCatching {
+            context.startActivity(intent)
+        }.onFailure {
+            viewModel.showMessage("No system equalizer app found")
         }
     }
 
@@ -499,6 +514,7 @@ fun PlayerScreen(
             AudioTrackDialog(
                 tracks = audioTracks.map { it.name },
                 selectedIndex = selectedAudioIndex,
+                audioBoostEnabled = audioBoostEnabled,
                 onTrackSelected = { index ->
                     viewModel.selectAudioTrack(index)
                     showAudioDialog = false
@@ -506,6 +522,12 @@ fun PlayerScreen(
                 onAuto = {
                     viewModel.selectAudioTrack(-1)
                     showAudioDialog = false
+                },
+                onToggleAudioBoost = {
+                    viewModel.toggleAudioBoost()
+                },
+                onOpenSystemEqualizer = {
+                    openSystemEqualizer()
                 },
                 onDismiss = { showAudioDialog = false }
             )
@@ -1134,15 +1156,62 @@ fun SubtitleDialog(
 fun AudioTrackDialog(
     tracks: List<String>,
     selectedIndex: Int,
+    audioBoostEnabled: Boolean,
     onTrackSelected: (Int) -> Unit,
     onAuto: () -> Unit,
+    onToggleAudioBoost: () -> Unit,
+    onOpenSystemEqualizer: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Audio Track") },
+        title = { Text("Audio") },
         text = {
-            Column {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    text = "Audio tools",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                TextButton(
+                    onClick = onOpenSystemEqualizer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Open system equalizer")
+                }
+
+                TextButton(
+                    onClick = onToggleAudioBoost,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = if (audioBoostEnabled) "Audio boost: On" else "Audio boost: Off",
+                        color = if (audioBoostEnabled) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            Color.Unspecified
+                        }
+                    )
+                }
+
+                Text(
+                    text = "Track selection is remembered separately for each video.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Audio tracks",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
                 TextButton(
                     onClick = onAuto,
                     modifier = Modifier.fillMaxWidth()
@@ -1159,7 +1228,7 @@ fun AudioTrackDialog(
 
                 if (tracks.isEmpty()) {
                     Text(
-                        text = "No separate audio tracks found.",
+                        text = "No selectable audio tracks found yet.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(8.dp)
@@ -1171,7 +1240,7 @@ fun AudioTrackDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = track,
+                                text = if (index == selectedIndex) "✓ $track" else track,
                                 color = if (index == selectedIndex) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
@@ -1183,7 +1252,11 @@ fun AudioTrackDialog(
                 }
             }
         },
-        confirmButton = {}
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
+            }
+        }
     )
 }
 
