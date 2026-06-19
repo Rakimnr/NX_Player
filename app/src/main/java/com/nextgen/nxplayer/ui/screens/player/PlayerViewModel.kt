@@ -20,6 +20,7 @@ import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.data.model.ResumeState
 import java.io.File
+import java.nio.charset.Charset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -34,6 +35,33 @@ enum class PlayerAspectMode(val label: String) {
     CROP("Crop"),
     STRETCH("Stretch")
 }
+
+enum class SubtitleTextColorOption(
+    val label: String,
+    val androidColor: Int
+) {
+    WHITE("White", android.graphics.Color.WHITE),
+    YELLOW("Yellow", android.graphics.Color.YELLOW),
+    CYAN("Cyan", android.graphics.Color.CYAN),
+    GREEN("Green", android.graphics.Color.GREEN)
+}
+
+enum class SubtitleEncodingOption(
+    val label: String,
+    val charsetName: String?
+) {
+    AUTO("Auto", null),
+    UTF_8("UTF-8", "UTF-8"),
+    UTF_16("UTF-16", "UTF-16"),
+    WINDOWS_1252("Windows-1252", "windows-1252"),
+    ISO_8859_1("ISO-8859-1", "ISO-8859-1")
+}
+
+data class SubtitleStyleSettings(
+    val fontSizeSp: Float = 20f,
+    val textColor: SubtitleTextColorOption = SubtitleTextColorOption.WHITE,
+    val backgroundOpacity: Float = 0.55f
+)
 
 @Suppress("unused")
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
@@ -76,6 +104,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _selectedSubtitleIndex = MutableStateFlow(-1)
     val selectedSubtitleIndex: StateFlow<Int> = _selectedSubtitleIndex
 
+    private val _subtitlesEnabled = MutableStateFlow(loadSavedSubtitlesEnabled())
+    val subtitlesEnabled: StateFlow<Boolean> = _subtitlesEnabled
+
+    private val _subtitleStyle = MutableStateFlow(loadSavedSubtitleStyle())
+    val subtitleStyle: StateFlow<SubtitleStyleSettings> = _subtitleStyle
+
+    private val _subtitleSyncOffsetMs = MutableStateFlow(loadSavedSubtitleOffsetMs())
+    val subtitleSyncOffsetMs: StateFlow<Long> = _subtitleSyncOffsetMs
+
+    private val _subtitleEncoding = MutableStateFlow(loadSavedSubtitleEncoding())
+    val subtitleEncoding: StateFlow<SubtitleEncodingOption> = _subtitleEncoding
+
+    private val _externalSubtitleName = MutableStateFlow<String?>(null)
+    val externalSubtitleName: StateFlow<String?> = _externalSubtitleName
+
     private val _audioTracks = MutableStateFlow<List<MediaTrack>>(emptyList())
     val audioTracks: StateFlow<List<MediaTrack>> = _audioTracks
 
@@ -84,6 +127,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private var positionJob: Job? = null
     private var messageJob: Job? = null
+    private var subtitleReloadJob: Job? = null
 
     private val db = AppDatabase.getInstance(application)
     private val prefs = PreferencesManager(application)
@@ -91,6 +135,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var currentVideoUri: Uri? = null
     private var initializedUri: String? = null
     private var externalSubtitleUri: Uri? = null
+    private var externalSubtitleLabel: String? = null
     private var currentQueue: List<QueuedVideo> = emptyList()
     private var currentQueueIndex: Int = 0
 
@@ -181,6 +226,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         initializedUri = requestedUriString
         externalSubtitleUri = findSidecarSubtitle(currentVideoUri ?: videoUri)
+        externalSubtitleLabel = externalSubtitleUri?.let { "Sidecar SRT: ${resolveDisplayName(it)}" }
+        _externalSubtitleName.value = externalSubtitleLabel
         errorMessage.value = null
         showResumeDialog.value = false
         currentPosition.value = 0L
@@ -208,6 +255,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             prepare()
             playWhenReady = true
         }
+        applySubtitleEnabledFlag(player)
+        if (shouldPrepareExternalSubtitleForPlayback()) {
+            replaceCurrentMediaItemWithSubtitle()
+        }
 
         startPositionTracking()
         updateQueueState()
@@ -231,17 +282,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     .build()
             )
 
-        if (subtitleUri != null) {
+        val mimeType = subtitleUri?.let { detectSubtitleMimeType(it) }
+        if (subtitleUri != null && mimeType != null) {
             val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(subtitleUri)
-                .setMimeType(detectSubtitleMimeType(subtitleUri))
+                .setMimeType(mimeType)
                 .setLanguage("und")
                 .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .setLabel(resolveSubtitleLabel(subtitleUri))
                 .build()
 
             builder.setSubtitleConfigurations(listOf(subtitleConfig))
         }
 
         return builder.build()
+    }
+
+    private fun resolveSubtitleLabel(uri: Uri): String {
+        val extension = detectSubtitleExtension(uri).uppercase()
+        val name = resolveDisplayName(uri).substringBeforeLast('.').ifBlank { "Subtitle" }
+        return if (extension.isNotBlank()) "$name • $extension" else name
     }
 
     private fun resolveDisplayName(uri: Uri): String {
@@ -276,18 +335,29 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrNull()
     }
 
-    private fun detectSubtitleMimeType(uri: Uri): String {
-        val text = uri.toString().substringBefore('?').lowercase()
-
-        return when {
-            text.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
-            text.endsWith(".vtt") -> MimeTypes.TEXT_VTT
-            text.endsWith(".ass") || text.endsWith(".ssa") -> MimeTypes.TEXT_SSA
-            text.endsWith(".ttml") || text.endsWith(".dfxp") || text.endsWith(".xml") -> {
-                MimeTypes.APPLICATION_TTML
-            }
+    private fun detectSubtitleMimeType(uri: Uri): String? {
+        return when (detectSubtitleExtension(uri)) {
+            "srt" -> MimeTypes.APPLICATION_SUBRIP
+            "vtt" -> MimeTypes.TEXT_VTT
+            "ass", "ssa" -> MimeTypes.TEXT_SSA
+            "ttml", "dfxp", "xml" -> MimeTypes.APPLICATION_TTML
+            "sub", "idx" -> null
             else -> MimeTypes.APPLICATION_SUBRIP
         }
+    }
+
+    private fun detectSubtitleExtension(uri: Uri): String {
+        val displayName = queryDisplayName(uri)
+        val source = displayName ?: uri.toString().substringBefore('?').substringAfterLast('/')
+        return source.substringAfterLast('.', "").lowercase()
+    }
+
+    private fun isVobSubSubtitle(uri: Uri): Boolean {
+        return detectSubtitleExtension(uri) in setOf("sub", "idx")
+    }
+
+    private fun isSrtSubtitle(uri: Uri): Boolean {
+        return detectSubtitleExtension(uri) == "srt"
     }
 
     private fun findSidecarSubtitle(videoUri: Uri): Uri? {
@@ -298,42 +368,180 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val folder = videoFile.parentFile ?: return null
         val baseName = videoFile.nameWithoutExtension
 
-        val supportedExtensions = listOf("srt", "vtt", "ass", "ssa", "ttml", "dfxp", "xml")
+        val exactSrt = File(folder, "$baseName.srt")
+        if (exactSrt.exists() && exactSrt.canRead()) {
+            return Uri.fromFile(exactSrt)
+        }
 
-        return supportedExtensions
-            .asSequence()
-            .map { extension -> File(folder, "$baseName.$extension") }
-            .firstOrNull { subtitleFile -> subtitleFile.exists() && subtitleFile.canRead() }
+        return folder.listFiles()
+            ?.asSequence()
+            ?.filter { file ->
+                file.isFile &&
+                        file.canRead() &&
+                        file.extension.equals("srt", ignoreCase = true) &&
+                        file.nameWithoutExtension.equals(baseName, ignoreCase = true)
+            }
+            ?.firstOrNull()
             ?.let { subtitleFile -> Uri.fromFile(subtitleFile) }
     }
 
     fun loadExternalSubtitle(subtitleUri: Uri) {
-        val videoUri = currentVideoUri ?: return
-        val player = exoPlayer ?: return
-
-        val wasPlaying = player.isPlaying
-        val current = player.currentPosition
-        val mediaItemIndex = player.currentMediaItemIndex.coerceAtLeast(0)
-
-        externalSubtitleUri = subtitleUri
-
-        val newItem = buildMediaItem(
-            videoUri = videoUri,
-            title = videoTitle.value,
-            subtitleUri = subtitleUri
-        )
-
-        if (mediaItemIndex < player.mediaItemCount) {
-            player.replaceMediaItem(mediaItemIndex, newItem)
-        } else {
-            player.setMediaItem(newItem)
+        if (isVobSubSubtitle(subtitleUri)) {
+            showMessage("VobSub .sub/.idx is image-based and is not supported yet")
+            return
         }
 
-        player.seekTo(mediaItemIndex.coerceAtMost((player.mediaItemCount - 1).coerceAtLeast(0)), current)
-        player.prepare()
-        player.playWhenReady = wasPlaying
+        val mimeType = detectSubtitleMimeType(subtitleUri)
+        if (mimeType == null) {
+            showMessage("Unsupported subtitle file")
+            return
+        }
 
-        showMessage("Subtitle loaded")
+        externalSubtitleUri = subtitleUri
+        externalSubtitleLabel = "External: ${resolveDisplayName(subtitleUri)}"
+        _externalSubtitleName.value = externalSubtitleLabel
+        setSubtitlesEnabled(true, showToast = false)
+        replaceCurrentMediaItemWithSubtitle("Subtitle loaded")
+    }
+
+    private fun shouldPrepareExternalSubtitleForPlayback(): Boolean {
+        val subtitleUri = externalSubtitleUri ?: return false
+        return isSrtSubtitle(subtitleUri) &&
+                (_subtitleSyncOffsetMs.value != 0L || _subtitleEncoding.value != SubtitleEncodingOption.AUTO)
+    }
+
+    private fun replaceCurrentMediaItemWithSubtitle(doneMessage: String? = null) {
+        val videoUri = currentVideoUri ?: return
+        val player = exoPlayer ?: return
+        val originalSubtitleUri = externalSubtitleUri
+        val currentIndex = player.currentMediaItemIndex.coerceAtLeast(0)
+        val currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+        val wasPlaying = player.isPlaying || player.playWhenReady
+
+        subtitleReloadJob?.cancel()
+        subtitleReloadJob = viewModelScope.launch {
+            val playableSubtitleUri = withContext(Dispatchers.IO) {
+                originalSubtitleUri?.let { prepareSubtitleForPlayback(it) }
+            }
+
+            val newItem = buildMediaItem(
+                videoUri = videoUri,
+                title = videoTitle.value,
+                subtitleUri = playableSubtitleUri
+            )
+
+            if (currentIndex < player.mediaItemCount) {
+                player.replaceMediaItem(currentIndex, newItem)
+            } else {
+                player.setMediaItem(newItem)
+            }
+
+            player.seekTo(
+                currentIndex.coerceAtMost((player.mediaItemCount - 1).coerceAtLeast(0)),
+                currentPositionMs
+            )
+            player.prepare()
+            player.playWhenReady = wasPlaying
+            applySubtitleEnabledFlag(player)
+            updateAvailableTracks()
+
+            doneMessage?.let { showMessage(it) }
+        }
+    }
+
+    private fun prepareSubtitleForPlayback(originalUri: Uri): Uri {
+        if (!isSrtSubtitle(originalUri)) {
+            return originalUri
+        }
+
+        val offsetMs = _subtitleSyncOffsetMs.value
+        val encoding = _subtitleEncoding.value
+
+        if (offsetMs == 0L && encoding == SubtitleEncodingOption.AUTO) {
+            return originalUri
+        }
+
+        val app = getApplication<Application>()
+        val charset = runCatching {
+            encoding.charsetName?.let { Charset.forName(it) } ?: Charsets.UTF_8
+        }.getOrDefault(Charsets.UTF_8)
+
+        val bytes = app.contentResolver.openInputStream(originalUri)?.use { input ->
+            input.readBytes()
+        } ?: return originalUri
+
+        val originalText = String(bytes, charset)
+        val shiftedText = if (offsetMs != 0L) {
+            shiftSrtTiming(originalText, offsetMs)
+        } else {
+            originalText
+        }
+
+        val cacheFolder = File(app.cacheDir, "nx_subtitles").apply {
+            if (!exists()) mkdirs()
+        }
+
+        val safeHash = originalUri.toString().hashCode().toString().replace("-", "m")
+        val cacheFile = File(
+            cacheFolder,
+            "subtitle_${safeHash}_${offsetMs}_${encoding.name}.srt"
+        )
+
+        cacheFile.writeText(shiftedText, Charsets.UTF_8)
+        return Uri.fromFile(cacheFile)
+    }
+
+    private fun shiftSrtTiming(srtText: String, offsetMs: Long): String {
+        val timingPattern = Regex(
+            """(\d{1,2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2},\d{3})(.*)"""
+        )
+
+        return srtText
+            .lineSequence()
+            .map { line ->
+                val match = timingPattern.matchEntire(line)
+                if (match == null) {
+                    line
+                } else {
+                    val start = parseSrtTimeToMs(match.groupValues[1])
+                    val end = parseSrtTimeToMs(match.groupValues[2])
+                    if (start == null || end == null) {
+                        line
+                    } else {
+                        val shiftedStart = (start + offsetMs).coerceAtLeast(0L)
+                        val shiftedEnd = (end + offsetMs).coerceAtLeast(0L)
+                        "${formatSrtTime(shiftedStart)} --> ${formatSrtTime(shiftedEnd)}${match.groupValues[3]}"
+                    }
+                }
+            }
+            .joinToString("\n")
+    }
+
+    private fun parseSrtTimeToMs(value: String): Long? {
+        val mainParts = value.split(',')
+        if (mainParts.size != 2) return null
+
+        val timeParts = mainParts[0].split(':')
+        if (timeParts.size != 3) return null
+
+        return runCatching {
+            val hours = timeParts[0].toLong()
+            val minutes = timeParts[1].toLong()
+            val seconds = timeParts[2].toLong()
+            val millis = mainParts[1].toLong()
+            (((hours * 60L + minutes) * 60L + seconds) * 1000L) + millis
+        }.getOrNull()
+    }
+
+    private fun formatSrtTime(milliseconds: Long): String {
+        val safeMs = milliseconds.coerceAtLeast(0L)
+        val totalSeconds = safeMs / 1000L
+        val millis = safeMs % 1000L
+        val seconds = totalSeconds % 60L
+        val minutes = (totalSeconds / 60L) % 60L
+        val hours = totalSeconds / 3600L
+
+        return "%02d:%02d:%02d,%03d".format(hours, minutes, seconds, millis)
     }
 
     private fun startPositionTracking() {
@@ -496,6 +704,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         duration.value = 0L
         currentPosition.value = 0L
         externalSubtitleUri = null
+        externalSubtitleLabel = null
+        _externalSubtitleName.value = null
         resetTrackState()
     }
 
@@ -514,14 +724,23 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             currentVideoUri = queuedVideo.uri.toUri()
             initializedUri = queuedVideo.uri
             videoTitle.value = queuedVideo.title.ifBlank { resolveDisplayName(currentVideoUri!!) }
+            syncSidecarForCurrentVideo()
         } else {
             val itemUri = player.currentMediaItem?.localConfiguration?.uri
             if (itemUri != null) {
                 currentVideoUri = itemUri
                 initializedUri = itemUri.toString()
                 videoTitle.value = resolveDisplayName(itemUri)
+                syncSidecarForCurrentVideo()
             }
         }
+    }
+
+    private fun syncSidecarForCurrentVideo() {
+        val sidecar = currentVideoUri?.let { findSidecarSubtitle(it) }
+        externalSubtitleUri = sidecar
+        externalSubtitleLabel = sidecar?.let { "Sidecar SRT: ${resolveDisplayName(it)}" }
+        _externalSubtitleName.value = externalSubtitleLabel
     }
 
     private fun updateQueueState() {
@@ -607,7 +826,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         _subtitleTracks.value = textTracks
-        _selectedSubtitleIndex.value = selectedTextIndex
+        _selectedSubtitleIndex.value = if (_subtitlesEnabled.value) selectedTextIndex else -1
         _audioTracks.value = soundTracks
         _selectedAudioIndex.value = selectedSoundIndex
     }
@@ -625,19 +844,34 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         return cleanLabel ?: cleanLanguage ?: fallback
     }
 
+    fun setSubtitlesEnabled(enabled: Boolean, showToast: Boolean = true) {
+        _subtitlesEnabled.value = enabled
+        appPrefs.edit().putBoolean(KEY_SUBTITLES_ENABLED, enabled).apply()
+        applySubtitleEnabledFlag(exoPlayer)
+
+        if (enabled) {
+            updateAvailableTracks()
+            if (showToast) showMessage("Subtitles on")
+        } else {
+            _selectedSubtitleIndex.value = -1
+            if (showToast) showMessage("Subtitles off")
+        }
+    }
+
+    private fun applySubtitleEnabledFlag(player: Player?) {
+        val activePlayer = player ?: return
+        activePlayer.trackSelectionParameters =
+            activePlayer.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !_subtitlesEnabled.value)
+                .build()
+    }
+
     fun selectSubtitleTrack(index: Int) {
         val player = exoPlayer ?: return
 
         if (index < 0) {
-            player.trackSelectionParameters =
-                player.trackSelectionParameters
-                    .buildUpon()
-                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                    .build()
-
-            _selectedSubtitleIndex.value = -1
-            showMessage("Subtitles off")
+            setSubtitlesEnabled(false)
             return
         }
 
@@ -649,6 +883,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             listOf(selectedTrack.trackIndex)
         )
 
+        _subtitlesEnabled.value = true
+        appPrefs.edit().putBoolean(KEY_SUBTITLES_ENABLED, true).apply()
+
         player.trackSelectionParameters =
             player.trackSelectionParameters
                 .buildUpon()
@@ -659,6 +896,62 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         _selectedSubtitleIndex.value = index
         showMessage("Subtitle: ${selectedTrack.name}")
+    }
+
+    fun adjustSubtitleSyncOffset(deltaMs: Long) {
+        val newOffset = (_subtitleSyncOffsetMs.value + deltaMs)
+            .coerceIn(MIN_SUBTITLE_OFFSET_MS, MAX_SUBTITLE_OFFSET_MS)
+
+        _subtitleSyncOffsetMs.value = newOffset
+        appPrefs.edit().putLong(KEY_SUBTITLE_OFFSET_MS, newOffset).apply()
+
+        if (externalSubtitleUri != null && externalSubtitleUri?.let { isSrtSubtitle(it) } == true) {
+            replaceCurrentMediaItemWithSubtitle("Subtitle offset ${formatOffsetForMessage(newOffset)}")
+        } else {
+            showMessage("Offset saved for external SRT")
+        }
+    }
+
+    fun setSubtitleEncoding(encoding: SubtitleEncodingOption) {
+        _subtitleEncoding.value = encoding
+        appPrefs.edit().putString(KEY_SUBTITLE_ENCODING, encoding.name).apply()
+
+        if (externalSubtitleUri != null && externalSubtitleUri?.let { isSrtSubtitle(it) } == true) {
+            replaceCurrentMediaItemWithSubtitle("Encoding: ${encoding.label}")
+        } else {
+            showMessage("Encoding applies to external SRT")
+        }
+    }
+
+    fun setSubtitleFontSize(fontSizeSp: Float) {
+        val safeSize = fontSizeSp.coerceIn(14f, 34f)
+        val current = _subtitleStyle.value
+        saveSubtitleStyle(current.copy(fontSizeSp = safeSize))
+    }
+
+    fun setSubtitleColor(color: SubtitleTextColorOption) {
+        val current = _subtitleStyle.value
+        saveSubtitleStyle(current.copy(textColor = color))
+    }
+
+    fun setSubtitleBackgroundOpacity(opacity: Float) {
+        val safeOpacity = opacity.coerceIn(0f, 1f)
+        val current = _subtitleStyle.value
+        saveSubtitleStyle(current.copy(backgroundOpacity = safeOpacity))
+    }
+
+    fun resetSubtitleStyle() {
+        saveSubtitleStyle(SubtitleStyleSettings())
+        showMessage("Subtitle style reset")
+    }
+
+    private fun saveSubtitleStyle(settings: SubtitleStyleSettings) {
+        _subtitleStyle.value = settings
+        appPrefs.edit()
+            .putFloat(KEY_SUBTITLE_FONT_SIZE, settings.fontSizeSp)
+            .putString(KEY_SUBTITLE_COLOR, settings.textColor.name)
+            .putFloat(KEY_SUBTITLE_BG_OPACITY, settings.backgroundOpacity)
+            .apply()
     }
 
     fun selectAudioTrack(index: Int) {
@@ -764,6 +1057,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         messageJob?.cancel()
         messageJob = null
 
+        subtitleReloadJob?.cancel()
+        subtitleReloadJob = null
+
         exoPlayer?.release()
         exoPlayer = null
 
@@ -774,6 +1070,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         currentPosition.value = 0L
         _hasNextVideo.value = false
         _hasPreviousVideo.value = false
+        _externalSubtitleName.value = null
     }
 
     override fun onCleared() {
@@ -802,6 +1099,47 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrDefault(PlayerAspectMode.FIT)
     }
 
+    private fun loadSavedSubtitlesEnabled(): Boolean {
+        return appPrefs.getBoolean(KEY_SUBTITLES_ENABLED, true)
+    }
+
+    private fun loadSavedSubtitleStyle(): SubtitleStyleSettings {
+        val color = runCatching {
+            SubtitleTextColorOption.valueOf(
+                appPrefs.getString(KEY_SUBTITLE_COLOR, SubtitleTextColorOption.WHITE.name)
+                    ?: SubtitleTextColorOption.WHITE.name
+            )
+        }.getOrDefault(SubtitleTextColorOption.WHITE)
+
+        return SubtitleStyleSettings(
+            fontSizeSp = appPrefs.getFloat(KEY_SUBTITLE_FONT_SIZE, 20f).coerceIn(14f, 34f),
+            textColor = color,
+            backgroundOpacity = appPrefs.getFloat(KEY_SUBTITLE_BG_OPACITY, 0.55f).coerceIn(0f, 1f)
+        )
+    }
+
+    private fun loadSavedSubtitleOffsetMs(): Long {
+        return appPrefs.getLong(KEY_SUBTITLE_OFFSET_MS, 0L)
+            .coerceIn(MIN_SUBTITLE_OFFSET_MS, MAX_SUBTITLE_OFFSET_MS)
+    }
+
+    private fun loadSavedSubtitleEncoding(): SubtitleEncodingOption {
+        return runCatching {
+            SubtitleEncodingOption.valueOf(
+                appPrefs.getString(KEY_SUBTITLE_ENCODING, SubtitleEncodingOption.AUTO.name)
+                    ?: SubtitleEncodingOption.AUTO.name
+            )
+        }.getOrDefault(SubtitleEncodingOption.AUTO)
+    }
+
+    private fun formatOffsetForMessage(offsetMs: Long): String {
+        if (offsetMs == 0L) return "0.0s"
+
+        val sign = if (offsetMs > 0L) "+" else "-"
+        val seconds = kotlin.math.abs(offsetMs) / 1000f
+        return "$sign${"%.1f".format(seconds)}s"
+    }
+
     private fun formatSpeedForMessage(value: Float): String {
         return if (value % 1f == 0f) {
             value.toInt().toString()
@@ -813,5 +1151,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private const val PREFS_NAME = "nxplayer_prefs"
         private const val KEY_ASPECT_MODE = "player_aspect_mode"
+        private const val KEY_SUBTITLES_ENABLED = "player_subtitles_enabled"
+        private const val KEY_SUBTITLE_FONT_SIZE = "player_subtitle_font_size"
+        private const val KEY_SUBTITLE_COLOR = "player_subtitle_color"
+        private const val KEY_SUBTITLE_BG_OPACITY = "player_subtitle_background_opacity"
+        private const val KEY_SUBTITLE_OFFSET_MS = "player_subtitle_offset_ms"
+        private const val KEY_SUBTITLE_ENCODING = "player_subtitle_encoding"
+        private const val MIN_SUBTITLE_OFFSET_MS = -60_000L
+        private const val MAX_SUBTITLE_OFFSET_MS = 60_000L
     }
 }

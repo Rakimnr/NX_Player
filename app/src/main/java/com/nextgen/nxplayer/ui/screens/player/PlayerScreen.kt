@@ -5,6 +5,8 @@ package com.nextgen.nxplayer.ui.screens.player
 import android.app.Activity
 import android.content.Intent
 import android.media.AudioManager
+import android.util.TypedValue
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +25,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ClosedCaption
 import androidx.compose.material.icons.rounded.Lock
@@ -68,7 +72,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import com.nextgen.nxplayer.ui.screens.player.controls.PlaybackControls
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -99,6 +105,11 @@ fun PlayerScreen(
     val aspectMode by viewModel.aspectMode.collectAsState()
     val hasNextVideo by viewModel.hasNextVideo.collectAsState()
     val hasPreviousVideo by viewModel.hasPreviousVideo.collectAsState()
+    val subtitlesEnabled by viewModel.subtitlesEnabled.collectAsState()
+    val subtitleStyle by viewModel.subtitleStyle.collectAsState()
+    val subtitleSyncOffsetMs by viewModel.subtitleSyncOffsetMs.collectAsState()
+    val subtitleEncoding by viewModel.subtitleEncoding.collectAsState()
+    val externalSubtitleName by viewModel.externalSubtitleName.collectAsState()
 
     val context = LocalContext.current
     val activity = context as? Activity
@@ -210,11 +221,13 @@ fun PlayerScreen(
                     useController = false
                     keepScreenOn = true
                     resizeMode = aspectMode.toResizeMode()
+                    applyNxSubtitleStyle(subtitleStyle)
                 }
             },
             update = { playerView ->
                 playerView.player = viewModel.getPlayer()
                 playerView.resizeMode = aspectMode.toResizeMode()
+                playerView.applyNxSubtitleStyle(subtitleStyle)
             },
             modifier = Modifier
                 .fillMaxSize()
@@ -436,6 +449,11 @@ fun PlayerScreen(
             SubtitleDialog(
                 tracks = subtitleTracks.map { it.name },
                 selectedIndex = selectedSubIndex,
+                subtitlesEnabled = subtitlesEnabled,
+                externalSubtitleName = externalSubtitleName,
+                subtitleStyle = subtitleStyle,
+                subtitleSyncOffsetMs = subtitleSyncOffsetMs,
+                subtitleEncoding = subtitleEncoding,
                 onLoadExternalSubtitle = {
                     showSubtitleDialog = false
                     subtitlePicker.launch(
@@ -443,6 +461,7 @@ fun PlayerScreen(
                             "application/x-subrip",
                             "text/plain",
                             "text/vtt",
+                            "text/x-ssa",
                             "application/ttml+xml",
                             "*/*"
                         )
@@ -450,11 +469,27 @@ fun PlayerScreen(
                 },
                 onTrackSelected = { index ->
                     viewModel.selectSubtitleTrack(index)
-                    showSubtitleDialog = false
                 },
-                onDisable = {
-                    viewModel.selectSubtitleTrack(-1)
-                    showSubtitleDialog = false
+                onToggleSubtitles = { enabled ->
+                    viewModel.setSubtitlesEnabled(enabled)
+                },
+                onFontSizeChanged = { sizeSp ->
+                    viewModel.setSubtitleFontSize(sizeSp)
+                },
+                onColorSelected = { color ->
+                    viewModel.setSubtitleColor(color)
+                },
+                onBackgroundOpacityChanged = { opacity ->
+                    viewModel.setSubtitleBackgroundOpacity(opacity)
+                },
+                onSyncOffset = { deltaMs ->
+                    viewModel.adjustSubtitleSyncOffset(deltaMs)
+                },
+                onEncodingSelected = { encoding ->
+                    viewModel.setSubtitleEncoding(encoding)
+                },
+                onResetStyle = {
+                    viewModel.resetSubtitleStyle()
                 },
                 onDismiss = { showSubtitleDialog = false }
             )
@@ -863,16 +898,31 @@ fun SpeedDialog(
 fun SubtitleDialog(
     tracks: List<String>,
     selectedIndex: Int,
+    subtitlesEnabled: Boolean,
+    externalSubtitleName: String?,
+    subtitleStyle: SubtitleStyleSettings,
+    subtitleSyncOffsetMs: Long,
+    subtitleEncoding: SubtitleEncodingOption,
     onLoadExternalSubtitle: () -> Unit,
     onTrackSelected: (Int) -> Unit,
-    onDisable: () -> Unit,
+    onToggleSubtitles: (Boolean) -> Unit,
+    onFontSizeChanged: (Float) -> Unit,
+    onColorSelected: (SubtitleTextColorOption) -> Unit,
+    onBackgroundOpacityChanged: (Float) -> Unit,
+    onSyncOffset: (Long) -> Unit,
+    onEncodingSelected: (SubtitleEncodingOption) -> Unit,
+    onResetStyle: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Subtitles") },
         text = {
-            Column {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 Button(
                     onClick = onLoadExternalSubtitle,
                     modifier = Modifier.fillMaxWidth()
@@ -887,21 +937,41 @@ fun SubtitleDialog(
                     Text("Load subtitle file")
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                TextButton(
-                    onClick = onDisable,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                externalSubtitleName?.let { name ->
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Off",
-                        color = if (selectedIndex == -1) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            Color.Unspecified
-                        }
+                        text = name,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Subtitle display",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    OutlinedButton(
+                        onClick = { onToggleSubtitles(!subtitlesEnabled) }
+                    ) {
+                        Text(if (subtitlesEnabled) "On" else "Off")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Embedded / external tracks",
+                    style = MaterialTheme.typography.titleSmall
+                )
 
                 if (tracks.isEmpty()) {
                     Text(
@@ -918,7 +988,7 @@ fun SubtitleDialog(
                         ) {
                             Text(
                                 text = track,
-                                color = if (index == selectedIndex) {
+                                color = if (index == selectedIndex && subtitlesEnabled) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     Color.Unspecified
@@ -927,9 +997,136 @@ fun SubtitleDialog(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Sync offset: ${formatSubtitleOffset(subtitleSyncOffsetMs)}",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { onSyncOffset(-500L) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("-0.5s")
+                    }
+
+                    OutlinedButton(
+                        onClick = { onSyncOffset(500L) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("+0.5s")
+                    }
+                }
+
+                Text(
+                    text = "Offset is applied to external or sidecar SRT subtitles. Embedded/image subtitles stay selectable, but cannot be retimed here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Font size: ${subtitleStyle.fontSizeSp.roundToInt()}sp",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Slider(
+                    value = subtitleStyle.fontSizeSp,
+                    onValueChange = onFontSizeChanged,
+                    valueRange = 14f..34f
+                )
+
+                Text(
+                    text = "Font color",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SubtitleTextColorOption.values().forEach { colorOption ->
+                        OutlinedButton(
+                            onClick = { onColorSelected(colorOption) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = colorOption.label,
+                                color = if (subtitleStyle.textColor == colorOption) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color.Unspecified
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Background opacity: ${(subtitleStyle.backgroundOpacity * 100f).roundToInt()}%",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                Slider(
+                    value = subtitleStyle.backgroundOpacity,
+                    onValueChange = onBackgroundOpacityChanged,
+                    valueRange = 0f..1f
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Encoding override",
+                    style = MaterialTheme.typography.titleSmall
+                )
+
+                SubtitleEncodingOption.values().forEach { encoding ->
+                    TextButton(
+                        onClick = { onEncodingSelected(encoding) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = encoding.label,
+                            color = if (encoding == subtitleEncoding) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Unspecified
+                            }
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Encoding override is used when preparing external or sidecar SRT subtitles.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                TextButton(
+                    onClick = onResetStyle,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Reset subtitle style")
+                }
             }
         },
-        confirmButton = {}
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
+            }
+        }
     )
 }
 
@@ -988,6 +1185,36 @@ fun AudioTrackDialog(
         },
         confirmButton = {}
     )
+}
+
+private fun PlayerView.applyNxSubtitleStyle(settings: SubtitleStyleSettings) {
+    findViewById<SubtitleView>(androidx.media3.ui.R.id.exo_subtitles)?.apply {
+        setApplyEmbeddedStyles(false)
+        setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, settings.fontSizeSp)
+        setStyle(
+            CaptionStyleCompat(
+                settings.textColor.androidColor,
+                blackWithOpacity(settings.backgroundOpacity),
+                AndroidColor.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                AndroidColor.BLACK,
+                null
+            )
+        )
+    }
+}
+
+private fun blackWithOpacity(opacity: Float): Int {
+    val alpha = (opacity.coerceIn(0f, 1f) * 255f).roundToInt()
+    return AndroidColor.argb(alpha, 0, 0, 0)
+}
+
+private fun formatSubtitleOffset(offsetMs: Long): String {
+    if (offsetMs == 0L) return "0.0s"
+
+    val sign = if (offsetMs > 0L) "+" else "-"
+    val seconds = abs(offsetMs) / 1000f
+    return "$sign${"%.1f".format(seconds)}s"
 }
 
 fun formatPlayerTime(milliseconds: Long): String {
