@@ -1,4 +1,4 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:Suppress("SpellCheckingInspection")
 package com.nextgen.nxplayer.ui.screens.player
 
 
@@ -70,6 +70,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.util.UnstableApi
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
@@ -81,6 +82,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     onBack: () -> Unit,
@@ -223,9 +225,7 @@ fun PlayerScreen(
     LaunchedEffect(isPlaying, controlsVisible, kidsLocked, errorMessage) {
         if (isPlaying && controlsVisible && !kidsLocked && errorMessage == null) {
             delay(3000)
-            if (isPlaying && controlsVisible && !kidsLocked && errorMessage == null) {
-                controlsVisible = false
-            }
+            controlsVisible = false
         }
     }
 
@@ -540,6 +540,7 @@ fun PlayerScreen(
     }
 }
 
+@androidx.annotation.OptIn(UnstableApi::class)
 private fun PlayerAspectMode.toResizeMode(): Int {
     return when (this) {
         PlayerAspectMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -713,8 +714,7 @@ private fun MxGestureLayer(
                                     }
                                 }
 
-                                DragMode.ZOOM,
-                                DragMode.NONE -> Unit
+                                else -> Unit
                             }
 
                             lastPosition = change.position
@@ -902,7 +902,7 @@ private fun LockedPlayerOverlay(onUnlock: () -> Unit) {
                 Spacer(modifier = Modifier.height(12.dp))
 
                 LinearProgressIndicator(
-                    progress = unlockProgress,
+                    progress = { unlockProgress },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -1116,7 +1116,7 @@ fun SubtitleDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    SubtitleTextColorOption.values().forEach { colorOption ->
+                    SubtitleTextColorOption.entries.forEach { colorOption ->
                         OutlinedButton(
                             onClick = { onColorSelected(colorOption) },
                             modifier = Modifier.weight(1f)
@@ -1153,7 +1153,7 @@ fun SubtitleDialog(
                     style = MaterialTheme.typography.titleSmall
                 )
 
-                SubtitleEncodingOption.values().forEach { encoding ->
+                SubtitleEncodingOption.entries.forEach { encoding ->
                     TextButton(
                         onClick = { onEncodingSelected(encoding) },
                         modifier = Modifier.fillMaxWidth()
@@ -1301,6 +1301,7 @@ fun AudioTrackDialog(
     )
 }
 
+@androidx.annotation.OptIn(UnstableApi::class)
 private fun PlayerView.applyNxSubtitleStyle(settings: SubtitleStyleSettings) {
     findViewById<SubtitleView>(androidx.media3.ui.R.id.exo_subtitles)?.apply {
         setApplyEmbeddedStyles(false)

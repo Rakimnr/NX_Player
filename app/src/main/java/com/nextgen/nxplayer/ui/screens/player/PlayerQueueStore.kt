@@ -62,6 +62,7 @@ object PlayerQueueStore {
         }
     }
 
+    @Suppress("unused")
     @Synchronized
     fun clear() {
         queue = emptyList()

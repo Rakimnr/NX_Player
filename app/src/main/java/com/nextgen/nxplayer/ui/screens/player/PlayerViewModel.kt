@@ -1,4 +1,4 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:Suppress("SpellCheckingInspection")
 package com.nextgen.nxplayer.ui.screens.player
 
 import android.app.Application
@@ -25,6 +25,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime
 import com.nextgen.nxplayer.data.local.AppDatabase
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.data.model.ResumeState
@@ -73,6 +74,7 @@ data class SubtitleStyleSettings(
 )
 
 @Suppress("unused")
+@androidx.annotation.OptIn(UnstableApi::class)
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     private var exoPlayer: ExoPlayer? = null
@@ -166,7 +168,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val existing = exoPlayer
         if (existing != null) return existing
 
-        val newPlayer = ExoPlayer.Builder(getApplication<Application>())
+        val newPlayer = ExoPlayer.Builder(getApplication())
             .setRenderersFactory(buildRenderersFactory())
             .build()
         exoPlayer = newPlayer
@@ -175,7 +177,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun buildRenderersFactory(): DefaultRenderersFactory {
-        return DefaultRenderersFactory(getApplication<Application>())
+        return DefaultRenderersFactory(getApplication())
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
     }
@@ -229,7 +231,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         player.addAnalyticsListener(object : AnalyticsListener {
             override fun onAudioSessionIdChanged(
-                eventTime: AnalyticsListener.EventTime,
+                eventTime: EventTime,
                 audioSessionId: Int
             ) {
                 currentAudioSessionId = audioSessionId
@@ -344,10 +346,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             ?: format.codecs
             ?: "unknown codec"
         val channels = format.channelCount
-            .takeIf { it > 0 && it != C.LENGTH_UNSET }
+            .takeIf { it > 0 }
             ?.let { "$it ch" }
         val sampleRate = format.sampleRate
-            .takeIf { it > 0 && it != C.LENGTH_UNSET }
+            .takeIf { it > 0 }
             ?.let { "$it Hz" }
 
         return listOfNotNull(codec, channels, sampleRate)
