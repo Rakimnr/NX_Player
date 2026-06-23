@@ -8,6 +8,10 @@ class PreferencesManager(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    init {
+        resetUnsafeAudioBoostPreferenceOnce()
+    }
+
     var privacyAccepted: Boolean
         get() = prefs.getBoolean(KEY_PRIVACY_ACCEPTED, false)
         set(value) = prefs.edit().putBoolean(KEY_PRIVACY_ACCEPTED, value).apply()
@@ -88,6 +92,16 @@ class PreferencesManager(context: Context) {
         get() = prefs.getBoolean(KEY_KIDS_LOCK_HIDE_CONTROLS, true)
         set(value) = prefs.edit().putBoolean(KEY_KIDS_LOCK_HIDE_CONTROLS, value).apply()
 
+    private fun resetUnsafeAudioBoostPreferenceOnce() {
+        if (prefs.getBoolean(KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE, false)) return
+
+        prefs.edit()
+            .putBoolean(KEY_AUDIO_BOOST, false)
+            .remove(KEY_LEGACY_AUDIO_BOOST)
+            .putBoolean(KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE, true)
+            .apply()
+    }
+
     fun resetToDefaults() {
         prefs.edit()
             .putBoolean(KEY_RESUME_PLAYBACK, true)
@@ -128,6 +142,8 @@ class PreferencesManager(context: Context) {
         private const val KEY_SUBTITLE_ENCODING = "subtitle_encoding"
 
         private const val KEY_AUDIO_BOOST = "audio_boost"
+        private const val KEY_LEGACY_AUDIO_BOOST = "player_audio_boost_enabled"
+        private const val KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE = "audio_boost_safe_migration_done"
         private const val KEY_REMEMBER_AUDIO_TRACK_PER_VIDEO = "remember_audio_track_per_video"
         private const val KEY_PREFERRED_AUDIO_LANGUAGE = "preferred_audio_language"
 

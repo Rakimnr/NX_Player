@@ -136,6 +136,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var currentAudioSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+    private var audioBoostAppliedSessionId: Int = C.AUDIO_SESSION_ID_UNSET
     private var audioPreferenceAppliedForUri: String? = null
 
     private var positionJob: Job? = null
@@ -186,7 +187,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         duration.value = if (playerDuration != C.TIME_UNSET) playerDuration else 0L
                         updateAvailableTracks()
                         updateQueueState()
-                        applyAudioBoostToCurrentSession(showFailure = false)
                     }
 
                     Player.STATE_ENDED -> {
@@ -201,7 +201,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 audioPreferenceAppliedForUri = null
                 updateAvailableTracks()
                 updateQueueState()
-                applyAudioBoostToCurrentSession(showFailure = false)
             }
 
             override fun onTracksChanged(tracks: Tracks) {
@@ -222,6 +221,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 audioSessionId: Int
             ) {
                 currentAudioSessionId = audioSessionId
+
+                if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
+                    releaseAudioBoostEffect()
+                    return
+                }
+
                 applyAudioBoostToCurrentSession(showFailure = false)
             }
         })
@@ -283,7 +288,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             playWhenReady = true
         }
         applySubtitleEnabledFlag(player)
-        applyAudioBoostToCurrentSession(showFailure = false)
         if (shouldPrepareExternalSubtitleForPlayback()) {
             replaceCurrentMediaItemWithSubtitle()
         }
@@ -1130,11 +1134,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setAudioBoostEnabled(enabled: Boolean) {
         _audioBoostEnabled.value = enabled
         appPrefs.edit().putBoolean(KEY_AUDIO_BOOST_ENABLED, enabled).apply()
-        val applied = applyAudioBoostToCurrentSession(showFailure = enabled)
 
-        when {
-            !enabled -> showMessage("Audio boost off")
-            applied -> showMessage("Audio boost on")
+        if (!enabled) {
+            releaseAudioBoostEffect()
+            exoPlayer?.volume = 1f
+            showMessage("Audio boost off")
+            return
+        }
+
+        if (applyAudioBoostToCurrentSession(showFailure = true)) {
+            showMessage("Audio boost on")
         }
     }
 
@@ -1143,30 +1152,47 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun applyAudioBoostToCurrentSession(showFailure: Boolean): Boolean {
-        val player = exoPlayer ?: return false
-        releaseAudioBoostEffect()
-
         if (!_audioBoostEnabled.value) {
-            player.volume = 1f
-            return true
+            releaseAudioBoostEffect()
+            exoPlayer?.volume = 1f
+            return false
         }
 
         val sessionId = currentAudioSessionId
         if (sessionId == C.AUDIO_SESSION_ID_UNSET || sessionId <= 0) {
+            releaseAudioBoostEffect()
             if (showFailure) showMessage("Audio boost will apply after playback starts")
             return false
         }
 
+        if (loudnessEnhancer != null && audioBoostAppliedSessionId == sessionId) {
+            return true
+        }
+
+        releaseAudioBoostEffect()
+
         val result = runCatching {
-            LoudnessEnhancer(sessionId).apply {
-                setTargetGain(AUDIO_BOOST_GAIN_MB)
-                enabled = true
+            var enhancer: LoudnessEnhancer? = null
+            try {
+                val createdEnhancer = LoudnessEnhancer(sessionId)
+                enhancer = createdEnhancer
+                createdEnhancer.setTargetGain(SAFE_AUDIO_BOOST_GAIN_MB)
+                createdEnhancer.enabled = true
+                createdEnhancer
+            } catch (error: Throwable) {
+                runCatching {
+                    enhancer?.enabled = false
+                    enhancer?.release()
+                }
+                throw error
             }
         }
 
         result.onSuccess { enhancer ->
             loudnessEnhancer = enhancer
+            audioBoostAppliedSessionId = sessionId
         }.onFailure {
+            releaseAudioBoostEffect()
             if (showFailure) showMessage("Audio boost is not supported on this device")
         }
 
@@ -1179,6 +1205,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             loudnessEnhancer?.release()
         }
         loudnessEnhancer = null
+        audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
     }
 
     fun createSystemEqualizerIntent(): Intent? {
@@ -1272,6 +1299,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         initializedUri = null
         audioPreferenceAppliedForUri = null
         currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
+        audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
         isPlaying.value = false
         duration.value = 0L
         currentPosition.value = 0L
@@ -1340,6 +1368,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun loadSavedAudioBoostEnabled(): Boolean {
+        if (!appPrefs.getBoolean(KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE, false)) {
+            appPrefs.edit()
+                .putBoolean(KEY_AUDIO_BOOST_ENABLED, false)
+                .remove(KEY_LEGACY_AUDIO_BOOST_ENABLED)
+                .putBoolean(KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE, true)
+                .apply()
+            return false
+        }
+
         return appPrefs.getBoolean(KEY_AUDIO_BOOST_ENABLED, false)
     }
 
@@ -1369,9 +1406,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_SUBTITLE_OFFSET_MS = "player_subtitle_offset_ms"
         private const val KEY_SUBTITLE_ENCODING = "player_subtitle_encoding"
         private const val KEY_AUDIO_TRACK_PREFIX = "player_audio_track_"
-        private const val KEY_AUDIO_BOOST_ENABLED = "player_audio_boost_enabled"
+        private const val KEY_AUDIO_BOOST_ENABLED = "audio_boost"
+        private const val KEY_LEGACY_AUDIO_BOOST_ENABLED = "player_audio_boost_enabled"
+        private const val KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE = "audio_boost_safe_migration_done"
         private const val AUDIO_TRACK_AUTO = "AUTO"
-        private const val AUDIO_BOOST_GAIN_MB = 800
+        private const val SAFE_AUDIO_BOOST_GAIN_MB = 300 // 3 dB, LoudnessEnhancer uses millibels.
         private const val MIN_SUBTITLE_OFFSET_MS = -60_000L
         private const val MAX_SUBTITLE_OFFSET_MS = 60_000L
     }
