@@ -8,10 +8,12 @@ import android.media.audiofx.AudioEffect
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
@@ -19,6 +21,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import com.nextgen.nxplayer.data.local.AppDatabase
@@ -138,6 +141,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var currentAudioSessionId: Int = C.AUDIO_SESSION_ID_UNSET
     private var audioBoostAppliedSessionId: Int = C.AUDIO_SESSION_ID_UNSET
     private var audioPreferenceAppliedForUri: String? = null
+    private var unsupportedAudioWarningShownForUri: String? = null
 
     private var positionJob: Job? = null
     private var messageJob: Job? = null
@@ -161,10 +165,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val existing = exoPlayer
         if (existing != null) return existing
 
-        val newPlayer = ExoPlayer.Builder(getApplication<Application>()).build()
+        val newPlayer = ExoPlayer.Builder(getApplication<Application>())
+            .setRenderersFactory(buildRenderersFactory())
+            .build()
         exoPlayer = newPlayer
         attachPlayerListener(newPlayer)
         return newPlayer
+    }
+
+    private fun buildRenderersFactory(): DefaultRenderersFactory {
+        return DefaultRenderersFactory(getApplication<Application>())
+            .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
     }
 
     private fun attachPlayerListener(player: ExoPlayer) {
@@ -199,6 +211,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 syncCurrentQueueItemFromPlayer()
                 audioPreferenceAppliedForUri = null
+                unsupportedAudioWarningShownForUri = null
                 updateAvailableTracks()
                 updateQueueState()
             }
@@ -208,10 +221,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                errorMessage.value = error.localizedMessage ?: "Playback error"
-                showMessage("Playback error")
-                isPlaying.value = false
-                saveResumeState()
+                handlePlaybackError(error, player)
             }
         })
 
@@ -230,6 +240,116 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 applyAudioBoostToCurrentSession(showFailure = false)
             }
         })
+    }
+
+    private fun handlePlaybackError(error: PlaybackException, player: ExoPlayer) {
+        val friendlyMessage = buildFriendlyPlaybackErrorMessage(error, player)
+        Log.e(TAG, buildPlaybackErrorLog(error, player), error)
+
+        errorMessage.value = friendlyMessage
+        showMessage(friendlyMessage)
+        isPlaying.value = false
+        saveResumeState()
+    }
+
+    private fun buildFriendlyPlaybackErrorMessage(
+        error: PlaybackException,
+        player: ExoPlayer
+    ): String {
+        val audioDetails = getCurrentAudioFormatSummary(player)
+
+        return when (error.errorCode) {
+            PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> {
+                if (audioDetails.isNotBlank()) {
+                    "Unsupported or failed audio/video codec: $audioDetails"
+                } else {
+                    "Unsupported or failed audio/video codec"
+                }
+            }
+
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED -> {
+                "Audio output failed on this device. Try disabling Bluetooth/offload or choose another audio track."
+            }
+
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED -> {
+                "Unsupported video container. Try a different file format."
+            }
+
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> {
+                "This video file seems damaged or incomplete."
+            }
+
+            else -> error.localizedMessage ?: "Playback error"
+        }
+    }
+
+    private fun buildPlaybackErrorLog(error: PlaybackException, player: ExoPlayer): String {
+        val itemUri = player.currentMediaItem?.localConfiguration?.uri
+        val audioTracks = describeAudioTracks(player).ifBlank { "No audio track information available" }
+
+        return buildString {
+            appendLine("NX Player playback error")
+            appendLine("errorCode=${error.errorCode} (${PlaybackException.getErrorCodeName(error.errorCode)})")
+            appendLine("message=${error.message}")
+            appendLine("mediaUri=$itemUri")
+            appendLine("currentPosition=${player.currentPosition}")
+            appendLine("duration=${player.duration}")
+            appendLine("audioTracks=$audioTracks")
+        }
+    }
+
+    private fun getCurrentAudioFormatSummary(player: ExoPlayer): String {
+        return player.currentTracks.groups
+            .asSequence()
+            .filter { it.type == C.TRACK_TYPE_AUDIO }
+            .flatMap { group ->
+                (0 until group.length).asSequence().map { trackIndex ->
+                    val format = group.getTrackFormat(trackIndex)
+                    val support = if (group.isTrackSupported(trackIndex)) "supported" else "unsupported"
+                    "${formatAudioFormat(format)} ($support)"
+                }
+            }
+            .distinct()
+            .take(3)
+            .joinToString(", ")
+    }
+
+    private fun describeAudioTracks(player: ExoPlayer): String {
+        return player.currentTracks.groups
+            .asSequence()
+            .filter { it.type == C.TRACK_TYPE_AUDIO }
+            .flatMap { group ->
+                (0 until group.length).asSequence().map { trackIndex ->
+                    val format = group.getTrackFormat(trackIndex)
+                    val support = if (group.isTrackSupported(trackIndex)) "supported" else "unsupported"
+                    "${formatAudioFormat(format)} [$support]"
+                }
+            }
+            .joinToString(separator = "; ")
+    }
+
+    private fun formatAudioFormat(format: Format): String {
+        val codec = format.sampleMimeType
+            ?.substringAfterLast('/')
+            ?.uppercase()
+            ?: format.codecs
+            ?: "unknown codec"
+        val channels = format.channelCount
+            .takeIf { it > 0 && it != C.LENGTH_UNSET }
+            ?.let { "$it ch" }
+        val sampleRate = format.sampleRate
+            .takeIf { it > 0 && it != C.LENGTH_UNSET }
+            ?.let { "$it Hz" }
+
+        return listOfNotNull(codec, channels, sampleRate)
+            .joinToString(" • ")
     }
 
     fun initializePlayer(videoUri: Uri) {
@@ -266,6 +386,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         speed.value = prefs.defaultSpeed.coerceIn(0.25f, 4.0f)
         kidsLocked.value = false
         audioPreferenceAppliedForUri = null
+        unsupportedAudioWarningShownForUri = null
         resetTrackState()
 
         val mediaItems = currentQueue.map { queuedVideo ->
@@ -741,6 +862,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         externalSubtitleLabel = null
         _externalSubtitleName.value = null
         audioPreferenceAppliedForUri = null
+        unsupportedAudioWarningShownForUri = null
         resetTrackState()
     }
 
@@ -796,6 +918,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         val textTracks = mutableListOf<MediaTrack>()
         val soundTracks = mutableListOf<MediaTrack>()
+        val unsupportedAudioFormats = mutableListOf<String>()
         var selectedTextIndex = -1
         var selectedSoundIndex = -1
 
@@ -836,8 +959,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
                 C.TRACK_TYPE_AUDIO -> {
                     for (trackIndex in 0 until group.length) {
+                        val format = group.getTrackFormat(trackIndex)
                         if (group.isTrackSupported(trackIndex)) {
-                            val format = group.getTrackFormat(trackIndex)
                             val channelInfo = when (format.channelCount) {
                                 1 -> "Mono"
                                 2 -> "Stereo"
@@ -879,6 +1002,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             }
 
                             soundTracks.add(track)
+                        } else {
+                            unsupportedAudioFormats.add(formatAudioFormat(format))
                         }
                     }
                 }
@@ -895,6 +1020,33 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             selectedSoundIndex
         }
+
+        maybeShowUnsupportedAudioWarning(unsupportedAudioFormats, soundTracks.size)
+    }
+
+    private fun maybeShowUnsupportedAudioWarning(
+        unsupportedAudioFormats: List<String>,
+        supportedAudioTrackCount: Int
+    ) {
+        if (unsupportedAudioFormats.isEmpty() || supportedAudioTrackCount > 0) return
+
+        val uriKey = currentVideoUri?.toString() ?: initializedUri ?: return
+        if (unsupportedAudioWarningShownForUri == uriKey) return
+        unsupportedAudioWarningShownForUri = uriKey
+
+        val details = unsupportedAudioFormats
+            .distinct()
+            .take(2)
+            .joinToString(", ")
+        val message = if (details.isNotBlank()) {
+            "Unsupported audio codec: $details"
+        } else {
+            "Unsupported audio codec"
+        }
+
+        Log.w(TAG, "No supported audio tracks for $uriKey. Unsupported audio=$details")
+        errorMessage.value = "$message. Try another audio track or convert the file."
+        showMessage(message)
     }
 
     private fun buildTrackName(
@@ -1298,6 +1450,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playerListenerAdded = false
         initializedUri = null
         audioPreferenceAppliedForUri = null
+        unsupportedAudioWarningShownForUri = null
         currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
         audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
         isPlaying.value = false
@@ -1397,6 +1550,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     companion object {
+        private const val TAG = "NXPlayer"
         private const val PREFS_NAME = "nxplayer_prefs"
         private const val KEY_ASPECT_MODE = "player_aspect_mode"
         private const val KEY_SUBTITLES_ENABLED = "player_subtitles_enabled"

@@ -36,6 +36,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -80,9 +81,14 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.7.7")
 
     // Media3 ExoPlayer
-    implementation("androidx.media3:media3-exoplayer:1.5.1")
-    implementation("androidx.media3:media3-ui:1.5.1")
-    implementation("androidx.media3:media3-common:1.5.1")
+    val media3Version = "1.5.1"
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-ui:$media3Version")
+    implementation("androidx.media3:media3-common:$media3Version")
+
+    // FFmpeg audio decoder extension for files with codecs not supported by some devices
+    // Example: AC3, EAC3, DTS, DTS-HD, TrueHD, and some FLAC/MKV audio tracks.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
 
     // Room
     implementation("androidx.room:room-runtime:2.6.1")
@@ -94,4 +100,7 @@ dependencies {
 
     // Image loading for video thumbnails
     implementation("io.coil-kt:coil-compose:2.6.0")
+
+    // Required by the FFmpeg decoder dependency on some Android Gradle Plugin versions.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
