@@ -21,6 +21,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -179,6 +180,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
     }
 
+    @androidx.annotation.OptIn(UnstableApi::class)
     private fun attachPlayerListener(player: ExoPlayer) {
         if (playerListenerAdded) return
         playerListenerAdded = true
@@ -1548,6 +1550,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             value.toString().trimEnd('0').trimEnd('.')
         }
     }
+
 
     companion object {
         private const val TAG = "NXPlayer"

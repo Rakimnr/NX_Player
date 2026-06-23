@@ -83,11 +83,16 @@ import kotlin.math.sqrt
 
 @Composable
 fun PlayerScreen(
-    videoUri: String,
     onBack: () -> Unit,
     viewModel: PlayerViewModel = viewModel()
 ) {
-    val uri = remember(videoUri) { videoUri.toUri() }
+    val selectedVideo = remember { PlayerQueueStore.getSelectedVideo() }
+    val uri = remember(selectedVideo?.uri) { selectedVideo?.uri?.toUri() }
+
+    if (uri == null) {
+        MissingSelectedVideoState(onBack = onBack)
+        return
+    }
 
     val videoTitle by viewModel.videoTitle.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
@@ -727,6 +732,42 @@ private enum class DragMode {
     BRIGHTNESS,
     VOLUME,
     ZOOM
+}
+
+@Composable
+private fun MissingSelectedVideoState(onBack: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "No video selected",
+                    style = MaterialTheme.typography.titleLarge
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Please open a video again from the library.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Button(onClick = onBack) {
+                    Text("Back")
+                }
+            }
+        }
+    }
 }
 
 @Composable

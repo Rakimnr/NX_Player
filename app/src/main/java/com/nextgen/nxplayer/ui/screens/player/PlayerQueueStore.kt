@@ -8,11 +8,14 @@ data class QueuedVideo(
 )
 
 object PlayerQueueStore {
+
     private var queue: List<QueuedVideo> = emptyList()
+    private var selectedVideo: QueuedVideo? = null
 
     @Synchronized
     fun setQueue(videos: List<VideoItem>, selectedVideo: VideoItem) {
         val selectedUri = selectedVideo.uri.toString()
+
         val cleanedQueue = videos
             .distinctBy { it.uri.toString() }
             .map { video ->
@@ -32,6 +35,17 @@ object PlayerQueueStore {
                 )
             ) + cleanedQueue
         }
+
+        this.selectedVideo = queue.firstOrNull { it.uri == selectedUri }
+            ?: QueuedVideo(
+                uri = selectedUri,
+                title = selectedVideo.name.ifBlank { "Video" }
+            )
+    }
+
+    @Synchronized
+    fun getSelectedVideo(): QueuedVideo? {
+        return selectedVideo ?: queue.firstOrNull()
     }
 
     @Synchronized
@@ -46,5 +60,11 @@ object PlayerQueueStore {
                 )
             )
         }
+    }
+
+    @Synchronized
+    fun clear() {
+        queue = emptyList()
+        selectedVideo = null
     }
 }

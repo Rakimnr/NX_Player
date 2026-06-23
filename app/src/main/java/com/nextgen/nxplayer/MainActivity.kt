@@ -1,6 +1,5 @@
 package com.nextgen.nxplayer
 
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,11 +8,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.ui.screens.library.LibraryScreen
 import com.nextgen.nxplayer.ui.screens.player.PlayerQueueStore
@@ -53,8 +50,9 @@ class MainActivity : ComponentActivity() {
                             LibraryScreen(
                                 onVideoClick = { video, queue ->
                                     PlayerQueueStore.setQueue(queue, video)
-                                    val encoded = Uri.encode(video.uri.toString())
-                                    navController.navigate("player/$encoded")
+                                    navController.navigate("player") {
+                                        launchSingleTop = true
+                                    }
                                 },
                                 onSettingsClick = {
                                     navController.navigate("settings")
@@ -65,17 +63,8 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        composable(
-                            route = "player/{videoUri}",
-                            arguments = listOf(
-                                navArgument("videoUri") { type = NavType.StringType }
-                            )
-                        ) { entry ->
-                            val encoded = entry.arguments?.getString("videoUri") ?: ""
-                            val uri = Uri.decode(encoded)
-
+                        composable("player") {
                             PlayerScreen(
-                                videoUri = uri,
                                 onBack = {
                                     navController.popBackStack()
                                 }
