@@ -33,6 +33,8 @@ import java.io.File
 import java.nio.charset.Charset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -79,6 +81,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private var exoPlayer: ExoPlayer? = null
     private var playerListenerAdded = false
+    private var playerListener: Player.Listener? = null
+    private var analyticsListener: AnalyticsListener? = null
     private val appPrefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     val videoTitle = MutableStateFlow("")
@@ -187,7 +191,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (playerListenerAdded) return
         playerListenerAdded = true
 
-        player.addListener(object : Player.Listener {
+        val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 isPlaying.value = isPlayingNow
                 if (!isPlayingNow) {
@@ -227,9 +231,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             override fun onPlayerError(error: PlaybackException) {
                 handlePlaybackError(error, player)
             }
-        })
+        }
 
-        player.addAnalyticsListener(object : AnalyticsListener {
+        val analytics = object : AnalyticsListener {
             override fun onAudioSessionIdChanged(
                 eventTime: EventTime,
                 audioSessionId: Int
@@ -243,7 +247,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
                 applyAudioBoostToCurrentSession(showFailure = false)
             }
-        })
+        }
+
+        playerListener = listener
+        analyticsListener = analytics
+        player.addListener(listener)
+        player.addAnalyticsListener(analytics)
+    }
+
+    private fun detachPlayerListeners(player: ExoPlayer) {
+        playerListener?.let { listener ->
+            runCatching { player.removeListener(listener) }
+        }
+        analyticsListener?.let { listener ->
+            runCatching { player.removeAnalyticsListener(listener) }
+        }
+        playerListener = null
+        analyticsListener = null
+        playerListenerAdded = false
     }
 
     private fun handlePlaybackError(error: PlaybackException, player: ExoPlayer) {
@@ -358,6 +379,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun initializePlayer(videoUri: Uri) {
         val requestedUriString = videoUri.toString()
+        val previousUriString = currentVideoUri?.toString()
+        if (previousUriString != null && previousUriString != requestedUriString) {
+            saveResumeState()
+            releaseAudioBoostEffect()
+            currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
+            audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
+        }
+
         val fallbackTitle = resolveDisplayName(videoUri)
         val queue = PlayerQueueStore.getQueueFor(requestedUriString, fallbackTitle)
         val selectedIndex = queue.indexOfFirst { it.uri == requestedUriString }
@@ -583,28 +612,34 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 originalSubtitleUri?.let { prepareSubtitleForPlayback(it) }
             }
 
+            if (!isActive || exoPlayer !== player) return@launch
+
             val newItem = buildMediaItem(
                 videoUri = videoUri,
                 title = videoTitle.value,
                 subtitleUri = playableSubtitleUri
             )
 
-            if (currentIndex < player.mediaItemCount) {
-                player.replaceMediaItem(currentIndex, newItem)
-            } else {
-                player.setMediaItem(newItem)
+            runCatching {
+                if (currentIndex < player.mediaItemCount) {
+                    player.replaceMediaItem(currentIndex, newItem)
+                } else {
+                    player.setMediaItem(newItem)
+                }
+
+                player.seekTo(
+                    currentIndex.coerceAtMost((player.mediaItemCount - 1).coerceAtLeast(0)),
+                    currentPositionMs
+                )
+                player.prepare()
+                player.playWhenReady = wasPlaying
+                applySubtitleEnabledFlag(player)
+                updateAvailableTracks()
+
+                doneMessage?.let { showMessage(it) }
+            }.onFailure {
+                showMessage("Subtitle reload failed")
             }
-
-            player.seekTo(
-                currentIndex.coerceAtMost((player.mediaItemCount - 1).coerceAtLeast(0)),
-                currentPositionMs
-            )
-            player.prepare()
-            player.playWhenReady = wasPlaying
-            applySubtitleEnabledFlag(player)
-            updateAvailableTracks()
-
-            doneMessage?.let { showMessage(it) }
         }
     }
 
@@ -707,10 +742,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         positionJob?.cancel()
 
         positionJob = viewModelScope.launch {
-            while (exoPlayer != null) {
-                val player = exoPlayer
+            while (isActive) {
+                val player = exoPlayer ?: break
 
-                if (player != null) {
+                val stillUsable = runCatching {
                     currentPosition.value = player.currentPosition.coerceAtLeast(0L)
 
                     val playerDuration = player.duration
@@ -719,7 +754,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
 
                     updateQueueState()
-                }
+                }.isSuccess
+
+                if (!stillUsable || exoPlayer !== player) break
 
                 delay(300)
             }
@@ -1382,6 +1419,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 db.resumeDao().getResumeState(uri).firstOrNull()
             }
 
+            if (currentVideoUri?.toString() != uri || exoPlayer == null) return@launch
+
             state?.let {
                 if (it.positionMs > 5000L) {
                     pendingResumePosition = it.positionMs
@@ -1393,11 +1432,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun saveResumeState() {
-        val uri = currentVideoUri?.toString() ?: return
-        val pos = exoPlayer?.currentPosition ?: currentPosition.value
-        val maxDuration = duration.value
+        val state = buildResumeStateSnapshot() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            db.resumeDao().saveResumeState(state)
+        }
+    }
 
-        if (pos <= 1000L) return
+    private fun buildResumeStateSnapshot(): ResumeState? {
+        val uri = currentVideoUri?.toString() ?: return null
+        val player = exoPlayer
+        val pos = runCatching { player?.currentPosition }.getOrNull() ?: currentPosition.value
+        val maxDuration = runCatching { player?.duration }.getOrNull()
+            ?.takeIf { it != C.TIME_UNSET && it > 0L }
+            ?: duration.value
+
+        if (pos <= 1000L) return null
 
         val safePosition = if (maxDuration > 0L && pos >= maxDuration - 3000L) {
             0L
@@ -1405,13 +1454,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             pos
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
-            db.resumeDao().saveResumeState(
-                ResumeState(
-                    videoUri = uri,
-                    positionMs = safePosition
-                )
-            )
+        return ResumeState(
+            videoUri = uri,
+            positionMs = safePosition
+        )
+    }
+
+    private fun saveResumeStateBlocking() {
+        val state = buildResumeStateSnapshot() ?: return
+        runCatching {
+            runBlocking(Dispatchers.IO) {
+                db.resumeDao().saveResumeState(state)
+            }
         }
     }
 
@@ -1435,38 +1489,64 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun releasePlayer() {
-        saveResumeState()
+        releasePlayerInternal(blockingSave = false)
+    }
+
+    private fun releasePlayerInternal(blockingSave: Boolean) {
+        if (blockingSave) {
+            saveResumeStateBlocking()
+        } else {
+            saveResumeState()
+        }
 
         positionJob?.cancel()
         positionJob = null
 
         messageJob?.cancel()
         messageJob = null
+        playerMessage.value = null
 
         subtitleReloadJob?.cancel()
         subtitleReloadJob = null
 
-        releaseAudioBoostEffect()
-
-        exoPlayer?.release()
+        val player = exoPlayer
         exoPlayer = null
 
-        playerListenerAdded = false
+        if (player != null) {
+            runCatching { player.pause() }
+            runCatching { player.playWhenReady = false }
+            detachPlayerListeners(player)
+        } else {
+            playerListener = null
+            analyticsListener = null
+            playerListenerAdded = false
+        }
+
+        releaseAudioBoostEffect()
+
+        if (player != null) {
+            runCatching { player.clearMediaItems() }
+            runCatching { player.release() }
+        }
+
         initializedUri = null
         audioPreferenceAppliedForUri = null
         unsupportedAudioWarningShownForUri = null
         currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
         audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
+        pendingResumePosition = 0L
+        showResumeDialog.value = false
         isPlaying.value = false
         duration.value = 0L
         currentPosition.value = 0L
         _hasNextVideo.value = false
         _hasPreviousVideo.value = false
         _externalSubtitleName.value = null
+        resetTrackState()
     }
 
     override fun onCleared() {
-        releasePlayer()
+        releasePlayerInternal(blockingSave = true)
         super.onCleared()
     }
 

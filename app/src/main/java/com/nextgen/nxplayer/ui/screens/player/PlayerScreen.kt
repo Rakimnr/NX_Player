@@ -1,6 +1,8 @@
 @file:Suppress("SpellCheckingInspection")
 package com.nextgen.nxplayer.ui.screens.player
 
+import com.nextgen.nxplayer.R
+
 
 import android.app.Activity
 import android.content.Intent
@@ -212,7 +214,7 @@ fun PlayerScreen(
 
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            viewModel.saveCurrentPosition()
+            viewModel.releasePlayer()
         }
     }
 
