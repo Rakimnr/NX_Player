@@ -1,5 +1,6 @@
 package com.nextgen.nxplayer
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -10,7 +11,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.NavType
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.nextgen.nxplayer.data.local.PreferencesManager
 import com.nextgen.nxplayer.ui.screens.library.LibraryScreen
 import com.nextgen.nxplayer.ui.screens.player.PlayerQueueStore
@@ -50,7 +53,9 @@ class MainActivity : ComponentActivity() {
                             LibraryScreen(
                                 onVideoClick = { video, queue ->
                                     PlayerQueueStore.setQueue(queue, video)
-                                    navController.navigate("player") {
+                                    val encodedUri = Uri.encode(video.uri.toString())
+                                    val encodedTitle = Uri.encode(video.name.ifBlank { "Video" })
+                                    navController.navigate("player/$encodedUri/$encodedTitle") {
                                         launchSingleTop = true
                                     }
                                 },
@@ -63,8 +68,24 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        composable("player") {
+                        composable(
+                            route = "player/{videoUri}/{videoTitle}",
+                            arguments = listOf(
+                                navArgument("videoUri") { type = NavType.StringType },
+                                navArgument("videoTitle") { type = NavType.StringType }
+                            )
+                        ) { backStackEntry ->
+                            val videoUri = backStackEntry.arguments
+                                ?.getString("videoUri")
+                                ?.let(Uri::decode)
+                                ?.let(Uri::parse)
+                            val videoTitle = backStackEntry.arguments
+                                ?.getString("videoTitle")
+                                ?.let(Uri::decode)
+
                             PlayerScreen(
+                                initialVideoUri = videoUri,
+                                initialVideoTitle = videoTitle,
                                 onBack = {
                                     navController.popBackStack()
                                 }

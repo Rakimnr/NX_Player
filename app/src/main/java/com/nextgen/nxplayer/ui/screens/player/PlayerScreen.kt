@@ -1,15 +1,12 @@
 @file:Suppress("SpellCheckingInspection")
 package com.nextgen.nxplayer.ui.screens.player
 
-import com.nextgen.nxplayer.R
-
 
 import android.app.Activity
 import android.content.Intent
 import android.media.AudioManager
-import android.util.TypedValue
-import android.graphics.Color as AndroidColor
 import android.net.Uri
+import android.util.TypedValue
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,7 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -62,7 +59,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -72,8 +68,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.media3.common.util.UnstableApi
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
@@ -83,14 +80,24 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import android.graphics.Color as AndroidColor
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     onBack: () -> Unit,
+    initialVideoUri: Uri? = null,
+    initialVideoTitle: String? = null,
     viewModel: PlayerViewModel = viewModel()
 ) {
-    val selectedVideo = remember { PlayerQueueStore.getSelectedVideo() }
+    val selectedVideo = remember(initialVideoUri, initialVideoTitle) {
+        initialVideoUri?.let { uri ->
+            QueuedVideo(
+                uri = uri.toString(),
+                title = initialVideoTitle?.takeIf { it.isNotBlank() } ?: "Video"
+            )
+        } ?: PlayerQueueStore.getSelectedVideo()
+    }
     val uri = remember(selectedVideo?.uri) { selectedVideo?.uri?.toUri() }
 
     if (uri == null) {
@@ -98,28 +105,28 @@ fun PlayerScreen(
         return
     }
 
-    val videoTitle by viewModel.videoTitle.collectAsState()
-    val isPlaying by viewModel.isPlaying.collectAsState()
-    val currentPosition by viewModel.currentPosition.collectAsState()
-    val duration by viewModel.duration.collectAsState()
-    val kidsLocked by viewModel.kidsLocked.collectAsState()
-    val currentSpeed by viewModel.speed.collectAsState()
-    val subtitleTracks by viewModel.subtitleTracks.collectAsState()
-    val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsState()
-    val audioTracks by viewModel.audioTracks.collectAsState()
-    val selectedAudioIndex by viewModel.selectedAudioIndex.collectAsState()
-    val audioBoostEnabled by viewModel.audioBoostEnabled.collectAsState()
-    val playerMessage by viewModel.playerMessage.collectAsState()
-    val showResumeDialog by viewModel.showResumeDialog.collectAsState()
-    val errorMessage by viewModel.errorMessage.collectAsState()
-    val aspectMode by viewModel.aspectMode.collectAsState()
-    val hasNextVideo by viewModel.hasNextVideo.collectAsState()
-    val hasPreviousVideo by viewModel.hasPreviousVideo.collectAsState()
-    val subtitlesEnabled by viewModel.subtitlesEnabled.collectAsState()
-    val subtitleStyle by viewModel.subtitleStyle.collectAsState()
-    val subtitleSyncOffsetMs by viewModel.subtitleSyncOffsetMs.collectAsState()
-    val subtitleEncoding by viewModel.subtitleEncoding.collectAsState()
-    val externalSubtitleName by viewModel.externalSubtitleName.collectAsState()
+    val videoTitle by viewModel.videoTitle.collectAsStateWithLifecycle()
+    val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+    val currentPosition by viewModel.currentPosition.collectAsStateWithLifecycle()
+    val duration by viewModel.duration.collectAsStateWithLifecycle()
+    val kidsLocked by viewModel.kidsLocked.collectAsStateWithLifecycle()
+    val currentSpeed by viewModel.speed.collectAsStateWithLifecycle()
+    val subtitleTracks by viewModel.subtitleTracks.collectAsStateWithLifecycle()
+    val selectedSubIndex by viewModel.selectedSubtitleIndex.collectAsStateWithLifecycle()
+    val audioTracks by viewModel.audioTracks.collectAsStateWithLifecycle()
+    val selectedAudioIndex by viewModel.selectedAudioIndex.collectAsStateWithLifecycle()
+    val audioBoostEnabled by viewModel.audioBoostEnabled.collectAsStateWithLifecycle()
+    val playerMessage by viewModel.playerMessage.collectAsStateWithLifecycle()
+    val showResumeDialog by viewModel.showResumeDialog.collectAsStateWithLifecycle()
+    val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val aspectMode by viewModel.aspectMode.collectAsStateWithLifecycle()
+    val hasNextVideo by viewModel.hasNextVideo.collectAsStateWithLifecycle()
+    val hasPreviousVideo by viewModel.hasPreviousVideo.collectAsStateWithLifecycle()
+    val subtitlesEnabled by viewModel.subtitlesEnabled.collectAsStateWithLifecycle()
+    val subtitleStyle by viewModel.subtitleStyle.collectAsStateWithLifecycle()
+    val subtitleSyncOffsetMs by viewModel.subtitleSyncOffsetMs.collectAsStateWithLifecycle()
+    val subtitleEncoding by viewModel.subtitleEncoding.collectAsStateWithLifecycle()
+    val externalSubtitleName by viewModel.externalSubtitleName.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val activity = context as? Activity
@@ -201,11 +208,19 @@ fun PlayerScreen(
         }
     }
 
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, uri, activity) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE,
-                Lifecycle.Event.ON_STOP -> viewModel.saveCurrentPosition()
+                Lifecycle.Event.ON_START -> viewModel.initializePlayer(uri)
+                Lifecycle.Event.ON_PAUSE -> viewModel.saveCurrentPosition()
+                Lifecycle.Event.ON_STOP -> {
+                    if (activity?.isInPictureInPictureMode == true) {
+                        viewModel.saveCurrentPosition()
+                    } else {
+                        viewModel.pauseAndSaveForExit()
+                        viewModel.releasePlayer()
+                    }
+                }
                 else -> Unit
             }
         }
@@ -241,7 +256,7 @@ fun PlayerScreen(
                 PlayerView(ctx).apply {
                     player = viewModel.getPlayer()
                     useController = false
-                    keepScreenOn = true
+                    keepScreenOn = isPlaying && !kidsLocked && errorMessage == null
                     resizeMode = aspectMode.toResizeMode()
                     applyNxSubtitleStyle(subtitleStyle)
                 }
@@ -249,6 +264,7 @@ fun PlayerScreen(
             update = { playerView ->
                 playerView.player = viewModel.getPlayer()
                 playerView.resizeMode = aspectMode.toResizeMode()
+                playerView.keepScreenOn = isPlaying && !kidsLocked && errorMessage == null
                 playerView.applyNxSubtitleStyle(subtitleStyle)
             },
             modifier = Modifier

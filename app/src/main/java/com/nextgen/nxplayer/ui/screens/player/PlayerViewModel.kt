@@ -85,15 +85,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var analyticsListener: AnalyticsListener? = null
     private val appPrefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    val videoTitle = MutableStateFlow("")
-    val isPlaying = MutableStateFlow(false)
-    val currentPosition = MutableStateFlow(0L)
-    val duration = MutableStateFlow(0L)
-    val speed = MutableStateFlow(1.0f)
-    val errorMessage = MutableStateFlow<String?>(null)
-    val playerMessage = MutableStateFlow<String?>(null)
-    val showResumeDialog = MutableStateFlow(false)
-    val kidsLocked = MutableStateFlow(false)
+    private val _videoTitle = MutableStateFlow("")
+    val videoTitle: StateFlow<String> = _videoTitle
+
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying: StateFlow<Boolean> = _isPlaying
+
+    private val _currentPosition = MutableStateFlow(0L)
+    val currentPosition: StateFlow<Long> = _currentPosition
+
+    private val _duration = MutableStateFlow(0L)
+    val duration: StateFlow<Long> = _duration
+
+    private val _speed = MutableStateFlow(1.0f)
+    val speed: StateFlow<Float> = _speed
+
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage
+
+    private val _playerMessage = MutableStateFlow<String?>(null)
+    val playerMessage: StateFlow<String?> = _playerMessage
+
+    private val _showResumeDialog = MutableStateFlow(false)
+    val showResumeDialog: StateFlow<Boolean> = _showResumeDialog
+
+    private val _kidsLocked = MutableStateFlow(false)
+    val kidsLocked: StateFlow<Boolean> = _kidsLocked
 
     private val _aspectMode = MutableStateFlow(loadSavedAspectMode())
     val aspectMode: StateFlow<PlayerAspectMode> = _aspectMode
@@ -193,7 +210,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-                isPlaying.value = isPlayingNow
+                _isPlaying.value = isPlayingNow
                 if (!isPlayingNow) {
                     saveResumeState()
                 }
@@ -202,15 +219,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_READY -> {
-                        errorMessage.value = null
+                        _errorMessage.value = null
                         val playerDuration = player.duration
-                        duration.value = if (playerDuration != C.TIME_UNSET) playerDuration else 0L
+                        _duration.value = if (playerDuration != C.TIME_UNSET) playerDuration else 0L
                         updateAvailableTracks()
                         updateQueueState()
                     }
 
                     Player.STATE_ENDED -> {
-                        isPlaying.value = false
+                        _isPlaying.value = false
                         saveResumeState()
                     }
                 }
@@ -271,9 +288,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val friendlyMessage = buildFriendlyPlaybackErrorMessage(error, player)
         Log.e(TAG, buildPlaybackErrorLog(error, player), error)
 
-        errorMessage.value = friendlyMessage
+        _errorMessage.value = friendlyMessage
         showMessage(friendlyMessage)
-        isPlaying.value = false
+        _isPlaying.value = false
         saveResumeState()
     }
 
@@ -398,7 +415,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         currentQueue = queue
         currentQueueIndex = selectedIndex
         currentVideoUri = selectedItem.uri.toUri()
-        videoTitle.value = selectedItem.title.ifBlank { fallbackTitle }
+        _videoTitle.value = selectedItem.title.ifBlank { fallbackTitle }
 
         val player = getOrCreatePlayer()
 
@@ -412,12 +429,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         externalSubtitleUri = findSidecarSubtitle(currentVideoUri ?: videoUri)
         externalSubtitleLabel = externalSubtitleUri?.let { "Sidecar SRT: ${resolveDisplayName(it)}" }
         _externalSubtitleName.value = externalSubtitleLabel
-        errorMessage.value = null
-        showResumeDialog.value = false
-        currentPosition.value = 0L
-        duration.value = 0L
-        speed.value = prefs.defaultSpeed.coerceIn(0.25f, 4.0f)
-        kidsLocked.value = false
+        _errorMessage.value = null
+        _showResumeDialog.value = false
+        _currentPosition.value = 0L
+        _duration.value = 0L
+        _speed.value = prefs.defaultSpeed.coerceIn(0.25f, 4.0f)
+        _kidsLocked.value = false
         audioPreferenceAppliedForUri = null
         unsupportedAudioWarningShownForUri = null
         resetTrackState()
@@ -437,7 +454,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         player.apply {
             setMediaItems(mediaItems, selectedIndex, C.TIME_UNSET)
-            setPlaybackSpeed(speed.value)
+            setPlaybackSpeed(_speed.value)
             prepare()
             playWhenReady = true
         }
@@ -523,6 +540,31 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrNull()
     }
 
+    private fun queryFileSize(uri: Uri): Long? {
+        if (uri.scheme == "file") {
+            return uri.path?.let { path ->
+                runCatching { File(path).length().takeIf { it >= 0L } }.getOrNull()
+            }
+        }
+
+        return runCatching {
+            getApplication<Application>().contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.SIZE),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && cursor.moveToFirst() && !cursor.isNull(sizeIndex)) {
+                    cursor.getLong(sizeIndex).takeIf { it >= 0L }
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
+    }
+
     private fun detectSubtitleMimeType(uri: Uri): String? {
         return when (detectSubtitleExtension(uri)) {
             "srt" -> MimeTypes.APPLICATION_SUBRIP
@@ -530,7 +572,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             "ass", "ssa" -> MimeTypes.TEXT_SSA
             "ttml", "dfxp", "xml" -> MimeTypes.APPLICATION_TTML
             "sub", "idx" -> null
-            else -> MimeTypes.APPLICATION_SUBRIP
+            else -> null
         }
     }
 
@@ -585,6 +627,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
+        val fileSize = queryFileSize(subtitleUri)
+        if (fileSize != null && fileSize > MAX_SUBTITLE_FILE_SIZE_BYTES) {
+            showMessage("Subtitle file is too large")
+            return
+        }
+
         externalSubtitleUri = subtitleUri
         externalSubtitleLabel = "External: ${resolveDisplayName(subtitleUri)}"
         _externalSubtitleName.value = externalSubtitleLabel
@@ -616,7 +664,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
             val newItem = buildMediaItem(
                 videoUri = videoUri,
-                title = videoTitle.value,
+                title = _videoTitle.value,
                 subtitleUri = playableSubtitleUri
             )
 
@@ -656,15 +704,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val app = getApplication<Application>()
+        val fileSize = queryFileSize(originalUri)
+        if (fileSize != null && fileSize > MAX_SUBTITLE_FILE_SIZE_BYTES) {
+            showMessage("Subtitle file is too large")
+            return originalUri
+        }
+
         val charset = runCatching {
             encoding.charsetName?.let { Charset.forName(it) } ?: Charsets.UTF_8
         }.getOrDefault(Charsets.UTF_8)
 
-        val bytes = app.contentResolver.openInputStream(originalUri)?.use { input ->
-            input.readBytes()
+        val originalText = app.contentResolver.openInputStream(originalUri)?.use { input ->
+            input.bufferedReader(charset).use { reader -> reader.readText() }
         } ?: return originalUri
 
-        val originalText = String(bytes, charset)
         val shiftedText = if (offsetMs != 0L) {
             shiftSrtTiming(originalText, offsetMs)
         } else {
@@ -746,11 +799,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val player = exoPlayer ?: break
 
                 val stillUsable = runCatching {
-                    currentPosition.value = player.currentPosition.coerceAtLeast(0L)
+                    _currentPosition.value = player.currentPosition.coerceAtLeast(0L)
 
                     val playerDuration = player.duration
                     if (playerDuration != C.TIME_UNSET && playerDuration > 0L) {
-                        duration.value = playerDuration
+                        _duration.value = playerDuration
                     }
 
                     updateQueueState()
@@ -770,14 +823,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             player.pause()
             saveResumeState()
         } else {
-            errorMessage.value = null
+            _errorMessage.value = null
             player.play()
         }
     }
 
     fun seekTo(positionMs: Long) {
         val player = exoPlayer ?: return
-        val maxDuration = duration.value.takeIf { it > 0L } ?: player.duration.takeIf {
+        val maxDuration = _duration.value.takeIf { it > 0L } ?: player.duration.takeIf {
             it != C.TIME_UNSET && it > 0L
         }
 
@@ -788,7 +841,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         player.seekTo(safePosition)
-        currentPosition.value = safePosition
+        _currentPosition.value = safePosition
     }
 
     fun seekRelative(deltaMs: Long) {
@@ -838,7 +891,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        errorMessage.value = null
+        _errorMessage.value = null
         initializedUri = null
         initializePlayer(uri)
     }
@@ -846,7 +899,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun setSpeed(newSpeed: Float) {
         val safeSpeed = newSpeed.coerceIn(0.25f, 4.0f)
         exoPlayer?.setPlaybackSpeed(safeSpeed)
-        speed.value = safeSpeed
+        _speed.value = safeSpeed
         prefs.defaultSpeed = safeSpeed
         showMessage("${formatSpeedForMessage(safeSpeed)}x")
     }
@@ -867,7 +920,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleKidsLock() {
-        if (kidsLocked.value) {
+        if (_kidsLocked.value) {
             unlockControls()
         } else {
             lockControls()
@@ -875,12 +928,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun lockControls() {
-        kidsLocked.value = true
+        _kidsLocked.value = true
         showMessage("Controls locked")
     }
 
     fun unlockControls() {
-        kidsLocked.value = false
+        _kidsLocked.value = false
         showMessage("Controls unlocked")
     }
 
@@ -892,13 +945,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun isLocked(): Boolean = kidsLocked.value
+    fun isLocked(): Boolean = _kidsLocked.value
 
     private fun resetForQueueMove() {
-        showResumeDialog.value = false
-        errorMessage.value = null
-        duration.value = 0L
-        currentPosition.value = 0L
+        _showResumeDialog.value = false
+        _errorMessage.value = null
+        _duration.value = 0L
+        _currentPosition.value = 0L
         externalSubtitleUri = null
         externalSubtitleLabel = null
         _externalSubtitleName.value = null
@@ -921,14 +974,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (queuedVideo != null) {
             currentVideoUri = queuedVideo.uri.toUri()
             initializedUri = queuedVideo.uri
-            videoTitle.value = queuedVideo.title.ifBlank { resolveDisplayName(currentVideoUri!!) }
+            _videoTitle.value = queuedVideo.title.ifBlank { resolveDisplayName(currentVideoUri!!) }
             syncSidecarForCurrentVideo()
         } else {
             val itemUri = player.currentMediaItem?.localConfiguration?.uri
             if (itemUri != null) {
                 currentVideoUri = itemUri
                 initializedUri = itemUri.toString()
-                videoTitle.value = resolveDisplayName(itemUri)
+                _videoTitle.value = resolveDisplayName(itemUri)
                 syncSidecarForCurrentVideo()
             }
         }
@@ -1086,7 +1139,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         Log.w(TAG, "No supported audio tracks for $uriKey. Unsupported audio=$details")
-        errorMessage.value = "$message. Try another audio track or convert the file."
+        _errorMessage.value = "$message. Try another audio track or convert the file."
         showMessage(message)
     }
 
@@ -1424,7 +1477,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             state?.let {
                 if (it.positionMs > 5000L) {
                     pendingResumePosition = it.positionMs
-                    showResumeDialog.value = true
+                    _showResumeDialog.value = true
                     exoPlayer?.pause()
                 }
             }
@@ -1441,10 +1494,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun buildResumeStateSnapshot(): ResumeState? {
         val uri = currentVideoUri?.toString() ?: return null
         val player = exoPlayer
-        val pos = runCatching { player?.currentPosition }.getOrNull() ?: currentPosition.value
+        val pos = runCatching { player?.currentPosition }.getOrNull() ?: _currentPosition.value
         val maxDuration = runCatching { player?.duration }.getOrNull()
             ?.takeIf { it != C.TIME_UNSET && it > 0L }
-            ?: duration.value
+            ?: _duration.value
 
         if (pos <= 1000L) return null
 
@@ -1480,11 +1533,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun showMessage(message: String) {
         messageJob?.cancel()
-        playerMessage.value = message
+        _playerMessage.value = message
 
         messageJob = viewModelScope.launch {
             delay(900)
-            playerMessage.value = null
+            _playerMessage.value = null
         }
     }
 
@@ -1504,7 +1557,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         messageJob?.cancel()
         messageJob = null
-        playerMessage.value = null
+        _playerMessage.value = null
 
         subtitleReloadJob?.cancel()
         subtitleReloadJob = null
@@ -1535,10 +1588,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
         audioBoostAppliedSessionId = C.AUDIO_SESSION_ID_UNSET
         pendingResumePosition = 0L
-        showResumeDialog.value = false
-        isPlaying.value = false
-        duration.value = 0L
-        currentPosition.value = 0L
+        _showResumeDialog.value = false
+        _isPlaying.value = false
+        _duration.value = 0L
+        _currentPosition.value = 0L
         _hasNextVideo.value = false
         _hasPreviousVideo.value = false
         _externalSubtitleName.value = null
@@ -1554,14 +1607,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         exoPlayer?.seekTo(pendingResumePosition)
         exoPlayer?.playWhenReady = true
         exoPlayer?.play()
-        showResumeDialog.value = false
+        _showResumeDialog.value = false
     }
 
     fun startFromBeginning() {
         exoPlayer?.seekTo(0)
         exoPlayer?.playWhenReady = true
         exoPlayer?.play()
-        showResumeDialog.value = false
+        _showResumeDialog.value = false
     }
 
     private fun loadSavedAspectMode(): PlayerAspectMode {
@@ -1650,6 +1703,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private const val KEY_AUDIO_BOOST_SAFE_MIGRATION_DONE = "audio_boost_safe_migration_done"
         private const val AUDIO_TRACK_AUTO = "AUTO"
         private const val SAFE_AUDIO_BOOST_GAIN_MB = 300 // 3 dB, LoudnessEnhancer uses millibels.
+        private const val MAX_SUBTITLE_FILE_SIZE_BYTES = 5L * 1024L * 1024L
         private const val MIN_SUBTITLE_OFFSET_MS = -60_000L
         private const val MAX_SUBTITLE_OFFSET_MS = 60_000L
     }
